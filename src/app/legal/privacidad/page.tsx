@@ -11,7 +11,7 @@ export default function PrivacidadPage() {
       <h2>1. Responsable de la base de datos</h2>
       <p>
         Responsable del tratamiento: <strong>{LEGAL_HOLDER.nombre}</strong>,
-        CUIT {LEGAL_HOLDER.cuit}, {LEGAL_HOLDER.ciudad}, Argentina. Contacto:{" "}
+        DNI {LEGAL_HOLDER.dni}, {LEGAL_HOLDER.domicilio}, Argentina. Contacto:{" "}
         <strong>{LEGAL_HOLDER.emailPrivacidad}</strong>. Esta política se rige
         por la <strong>Ley 25.326 de Protección de los Datos Personales</strong>,
         su decreto 1558/2001 y las disposiciones de la AAIP.

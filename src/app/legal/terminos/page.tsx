@@ -12,9 +12,10 @@ export default function TerminosPage() {
       <p>
         El sitio <strong>botclo.com</strong> y la aplicación{" "}
         <strong>Botclo</strong> (el «Servicio» o la «Plataforma») son operados
-        por <strong>{LEGAL_HOLDER.nombre}</strong>, persona humana, CUIT{" "}
-        {LEGAL_HOLDER.cuit}, {LEGAL_HOLDER.ciudad}, República Argentina (el
-        «Titular»). Contacto: <strong>{LEGAL_HOLDER.emailSoporte}</strong>.
+        por <strong>{LEGAL_HOLDER.nombre}</strong>, persona humana, DNI{" "}
+        {LEGAL_HOLDER.dni}, CUIT {LEGAL_HOLDER.cuit}, con domicilio en{" "}
+        {LEGAL_HOLDER.domicilio}, República Argentina (el «Titular»). Contacto:{" "}
+        <strong>{LEGAL_HOLDER.emailSoporte}</strong>.
       </p>
       <p>
         Botclo <strong>no es una sociedad comercial, no es una entidad

@@ -10,11 +10,15 @@ export const LEGAL_VERSIONS = {
 
 export type LegalDocument = keyof typeof LEGAL_VERSIONS;
 
-// Datos del titular — completar con los reales antes de publicar.
+// Datos del titular. El CUIT queda pendiente: es el que te da AFIP/ARCA al
+// darte de alta en el monotributo (formato 20/23/27-DNI-díg. verificador). No
+// lo inventamos porque un CUIT mal formado invalidaría los documentos.
 export const LEGAL_HOLDER = {
   nombre: "Manuel Ignacio Álvarez",
-  cuit: "[COMPLETAR CUIT]",
-  ciudad: "[COMPLETAR CIUDAD]",
+  dni: "34.291.269",
+  cuit: "[COMPLETAR CUIT — de tu constancia de AFIP/ARCA]",
+  domicilio: "Calle 467 N° 4500, City Bell, La Plata, Provincia de Buenos Aires",
+  ciudad: "City Bell, Provincia de Buenos Aires",
   emailSoporte: "soporte@botclo.com",
   emailPrivacidad: "privacidad@botclo.com",
 } as const;

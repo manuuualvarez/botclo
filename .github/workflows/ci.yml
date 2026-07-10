@@ -1,0 +1,46 @@
+name: CI
+
+# Semáforo del PR: corre en cada PR a main y en pushes a main.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    name: Lint · Types · Build · Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Chequeo de tipos
+        run: pnpm exec tsc --noEmit
+
+      - name: Tests de lógica (crypto, estrategias, facturación)
+        run: pnpm test:ci
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Valores dummy: el build no contacta servicios, solo necesita que
+          # las variables existan para no romper.
+          NEXT_PUBLIC_APP_URL: https://botclo.com
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2ktYnVpbGQ
+          CLERK_SECRET_KEY: sk_test_ci_build_placeholder
+          ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
