@@ -58,7 +58,7 @@ const testnetSteps = [
   },
 ];
 
-const mainnetSteps = [
+const mainnetSteps = (serverIp: string) => [
   {
     title: "Abrí la gestión de API en Binance",
     body: (
@@ -71,23 +71,41 @@ const mainnetSteps = [
     ),
   },
   {
-    title: "Elegí los permisos según lo que quieras hacer",
+    title: "Restringí la clave a nuestra IP (obligatorio y clave para tu seguridad)",
     body: (
       <>
         <span className="mb-1.5 block">
-          — ¿Solo mirar tu cartera y análisis? Dejá marcado únicamente{" "}
-          <strong>«Habilitar lectura»</strong>.
+          En la clave, tocá <strong>«Editar restricciones»</strong> y en{" "}
+          <strong>«Restricciones de acceso IP»</strong> elegí{" "}
+          <strong>«Restringir el acceso solo para direcciones IP confiables»</strong>.
+          Pegá esta IP:
         </span>
+        <code className="my-1 block w-fit rounded-md border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 font-mono text-emerald-300">
+          {serverIp}
+        </code>
+        <span className="block">
+          Es la IP de nuestros servidores, desde donde el robot opera por vos.
+          Con esto, aunque alguien obtuviera tu clave, <strong>no podría usarla
+          desde ninguna otra máquina</strong>. Binance además exige esta
+          restricción para poder habilitar el trading.
+        </span>
+      </>
+    ),
+  },
+  {
+    title: "Marcá los permisos",
+    body: (
+      <>
         <span className="mb-1.5 block">
-          — ¿Vas a usar el robot? Marcá también{" "}
-          <strong>«Habilitar trading de spot y de margen»</strong> (tranquilo:
-          el robot solo opera spot, jamás usa margen ni apalancamiento).
+          Marcá <strong>«Habilitar lectura»</strong> y{" "}
+          <strong>«Habilitar trading de Margen, Acciones y Spot»</strong>{" "}
+          (tranquilo: el robot <strong>solo opera spot</strong>, jamás usa
+          margen ni apalancamiento).
         </span>
         <span className="block">
-          En ningún caso actives <strong>«Habilitar retiros»</strong>: sin ese
-          permiso, nadie puede sacar tu plata de Binance con estas claves,
-          pase lo que pase. Si Binance te ofrece restringir la clave por IP,
-          mejor todavía.
+          <strong>Nunca</strong> actives «Habilitar retiros», «Futuros» ni
+          «transferencias»: sin el permiso de retiros, nadie puede sacar tu
+          plata de Binance con esta clave, pase lo que pase.
         </span>
       </>
     ),
@@ -109,7 +127,10 @@ export default async function ConectarPage() {
   if (await hasCredentials(userId)) redirect("/dashboard");
 
   const testnet = isTestnet();
-  const steps = testnet ? testnetSteps : mainnetSteps;
+  // IP de salida del servidor donde corre el robot (configurable por si el
+  // VPS cambia). Es la misma para todos los usuarios: todos operan desde acá.
+  const serverIp = process.env.SERVER_IP ?? "72.62.170.218";
+  const steps = testnet ? testnetSteps : mainnetSteps(serverIp);
 
   return (
     <>
@@ -137,8 +158,8 @@ export default async function ConectarPage() {
           )}
         </div>
         <p className="mt-3 text-lg text-muted-foreground">
-          Son tres pasos y no toma más de cinco minutos. Te guiamos uno por
-          uno.
+          Son {steps.length} pasos y no toma más de cinco minutos. Te guiamos
+          uno por uno.
         </p>
 
         <ol className="mt-10 flex flex-col gap-4">
