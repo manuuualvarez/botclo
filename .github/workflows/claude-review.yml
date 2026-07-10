@@ -1,0 +1,57 @@
+name: Claude Review
+
+# Claude Code analiza cada PR y postea un semáforo de riesgo como comentario.
+# Requiere el secret ANTHROPIC_API_KEY (Settings → Secrets and variables →
+# Actions). Sin ese secret, el job pasa en verde pero no revisa (no molesta).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: ¿Hay API key configurada?
+        id: guard
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "⏭️  Falta el secret ANTHROPIC_API_KEY — se omite la revisión de Claude."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.ok == 'true'
+        with:
+          fetch-depth: 0
+
+      - name: Revisión de Claude
+        if: steps.guard.outputs.ok == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Sos un revisor de código senior. Esto es Botclo: un bot de trading
+            de cripto que maneja API keys de Binance (cifradas), ejecuta órdenes
+            reales y procesa pagos con MercadoPago. El riesgo es alto: bugs pueden
+            costar dinero real de usuarios.
+
+            Revisá SOLO el diff de este PR. Enfocate en:
+            - Bugs de correctitud (sobre todo en el ejecutor del bot, backtest y facturación)
+            - Seguridad (manejo de secretos, autorización, validación de inputs, IDOR)
+            - Riesgo de que una operación consuma más presupuesto del debido
+            - Idempotencia y condiciones de carrera
+
+            Publicá UN comentario en el PR con:
+            1. Un semáforo de riesgo del PR: 🟢 bajo / 🟡 medio / 🔴 alto
+            2. Un resumen de una línea
+            3. Los hallazgos priorizados (archivo:línea), solo los que importan
+            Si no hay hallazgos, decílo y poné 🟢. Sé conciso y concreto.
+          claude_args: "--max-turns 20"
