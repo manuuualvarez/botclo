@@ -1,0 +1,64 @@
+# Desarrollo local: `pnpm dev` levanta todo esto.
+# La app corre en http://localhost:3000 con hot-reload (el código se monta
+# como volumen). Postgres queda accesible desde tu Mac en localhost:5432.
+name: norte-dev
+
+services:
+  web:
+    build:
+      context: .
+      target: dev
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      # Polling para que el hot-reload funcione siempre sobre el volumen de macOS
+      WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - .:/app
+      # Volúmenes propios del contenedor: node_modules de Linux no debe
+      # mezclarse con el de macOS, y .next/caché quedan fuera del bind mount.
+      - node_modules:/app/node_modules
+      - next_cache:/app/.next
+      # pnpm cae en un store local al proyecto cuando node_modules está en
+      # otro filesystem; este volumen lo captura para que no pise el bind mount.
+      - pnpm_store:/app/.pnpm-store
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Scheduler del robot: dispara el tick de trading cada BOT_TICK_SECONDS.
+  bot:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - web
+    entrypoint: /bin/sh
+    command: >
+      -c "sleep 20; while true; do
+        curl -s -m 90 -X POST -H \"x-cron-secret: ${CRON_SECRET:-}\" http://web:3000/api/bot/tick > /dev/null 2>&1 || true;
+        sleep ${BOT_TICK_SECONDS:-60};
+      done"
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-norte}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-norte_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-norte}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-norte} -d ${POSTGRES_DB:-norte}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  node_modules:
+  next_cache:
+  pnpm_store:
+  db_data:

@@ -1,0 +1,482 @@
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "@/db";
+import { botConfigs, botTrades } from "@/db/schema";
+import {
+  getKlines,
+  getSpotPrice,
+  getSymbolFilters,
+  isTestnet,
+  placeMarketOrder,
+  roundToStep,
+  type KlineInterval,
+} from "@/lib/binance/client";
+import { getDecryptedCredentials } from "@/lib/binance/credentials";
+import { capturePortfolioSnapshot } from "@/lib/binance/portfolio";
+import { getEntitlement } from "@/lib/plan";
+import { atr } from "@/lib/strategies/indicators";
+import { defaultParams, getStrategy } from "@/lib/strategies";
+import { sendTelegramMessage } from "@/lib/telegram";
+import { getTelegramCredentials } from "@/lib/telegram-settings";
+
+// Ejecutor del robot. Por tick y por bot:
+// 1. Chequea el stop de protección contra el precio ACTUAL (cada minuto).
+// 2. Si hay vela nueva cerrada: actualiza el trailing, evalúa la señal de la
+//    estrategia y ejecuta a lo sumo una orden MARKET.
+// Idempotencia: cada vela cerrada se procesa una sola vez (last_candle_time).
+
+export type BotConfig = typeof botConfigs.$inferSelect;
+
+export interface TickOutcome {
+  botId: number;
+  userId: string;
+  action: "buy" | "sell" | "hold" | "skip" | "error";
+  detail: string;
+}
+
+const INTERVAL_MS: Record<KlineInterval, number> = {
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "1d": 86_400_000,
+};
+
+const ATR_PERIOD = 14;
+const STOP_MIN_PCT = 0.03;
+const STOP_MAX_PCT = 0.2;
+
+// Lock de sesión global del tick: si un barrido tarda más que el intervalo
+// del scheduler, el siguiente `curl` no arranca en paralelo. Un solo tick
+// procesa los bots a la vez; los demás salen sin hacer nada.
+const TICK_LOCK_KEY = 918_273_645;
+
+export async function runAllActiveBots(): Promise<TickOutcome[]> {
+  const [{ locked }] = (await db.execute(
+    sql`SELECT pg_try_advisory_lock(${TICK_LOCK_KEY}) AS locked`
+  )) as unknown as { locked: boolean }[];
+  if (!locked) return [];
+
+  try {
+    const bots = await db
+      .select()
+      .from(botConfigs)
+      .where(eq(botConfigs.status, "active"));
+
+    const outcomes: TickOutcome[] = [];
+    for (const bot of bots) {
+      outcomes.push(await runBotTick(bot));
+    }
+
+    // Snapshot del valor de cartera por usuario (throttled a 1/hora adentro).
+    for (const userId of new Set(bots.map((b) => b.userId))) {
+      try {
+        await capturePortfolioSnapshot(userId);
+      } catch {
+        // el snapshot nunca debe romper el tick
+      }
+    }
+    return outcomes;
+  } finally {
+    await db.execute(sql`SELECT pg_advisory_unlock(${TICK_LOCK_KEY})`);
+  }
+}
+
+async function updateBot(
+  botId: number,
+  set: Partial<typeof botConfigs.$inferInsert>
+) {
+  await db
+    .update(botConfigs)
+    .set({ ...set, updatedAt: new Date() })
+    .where(eq(botConfigs.id, botId));
+}
+
+// Reserva atómica de la vela: avanza last_candle_time solo si todavía no fue
+// procesada. Si dos ejecuciones concurrentes (scheduler + "Ejecutar ahora")
+// llegan a la misma vela, solo UNA gana el UPDATE — la otra recibe 0 filas y
+// aborta, evitando una compra MARKET duplicada. `IS DISTINCT FROM` maneja el
+// caso NULL (primera corrida) correctamente.
+async function claimCandle(
+  botId: number,
+  candleOpenTime: number
+): Promise<boolean> {
+  const claimed = await db
+    .update(botConfigs)
+    .set({ lastCandleTime: candleOpenTime, lastRunAt: new Date() })
+    .where(
+      and(
+        eq(botConfigs.id, botId),
+        sql`${botConfigs.lastCandleTime} IS DISTINCT FROM ${candleOpenTime}`
+      )
+    )
+    .returning({ id: botConfigs.id });
+  return claimed.length > 0;
+}
+
+async function recordTrade(
+  bot: BotConfig,
+  side: "BUY" | "SELL",
+  qty: number,
+  price: number,
+  quoteQty: number,
+  orderId: number,
+  reason: string
+) {
+  await db.insert(botTrades).values({
+    botId: bot.id,
+    userId: bot.userId,
+    strategyId: bot.strategyId,
+    symbol: bot.symbol,
+    side,
+    qty,
+    price,
+    quoteQty,
+    binanceOrderId: orderId,
+    reason,
+    isTestnet: isTestnet(),
+  });
+}
+
+const usd = new Intl.NumberFormat("es-AR", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 2,
+});
+
+// Aviso por Telegram (si el usuario lo configuró). Nunca rompe el trade.
+async function notifyTrade(
+  bot: BotConfig,
+  strategyName: string,
+  side: "BUY" | "SELL",
+  qty: number,
+  price: number,
+  quoteQty: number,
+  reason: string
+) {
+  try {
+    const creds = await getTelegramCredentials(bot.userId);
+    if (!creds) return;
+    const modo = isTestnet()
+      ? "🧪 <b>MODO PRÁCTICA (testnet)</b>"
+      : "💰 <b>DINERO REAL</b>";
+    const encabezado =
+      side === "BUY" ? "🟢 <b>COMPRA</b>" : "🔴 <b>VENTA</b>";
+    await sendTelegramMessage(
+      creds.token,
+      creds.chatId,
+      [
+        modo,
+        `${encabezado} ${bot.symbol}`,
+        `Cantidad: ${qty}`,
+        `Precio: ${usd.format(price)}`,
+        `Total: ${usd.format(quoteQty)}`,
+        `Estrategia: ${strategyName}`,
+        `Motivo: ${reason}`,
+      ].join("\n")
+    );
+  } catch {
+    // sin Telegram no pasa nada
+  }
+}
+
+export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
+  const now = new Date();
+  const out = (action: TickOutcome["action"], detail: string): TickOutcome => ({
+    botId: bot.id,
+    userId: bot.userId,
+    action,
+    detail,
+  });
+
+  try {
+    const strategy = getStrategy(bot.strategyId);
+    if (!strategy) return out("skip", "estrategia desconocida");
+
+    const creds = await getDecryptedCredentials(bot.userId);
+    if (!creds) {
+      await updateBot(bot.id, {
+        lastRunAt: now,
+        lastError: "No hay una cuenta de Binance conectada.",
+      });
+      return out("skip", "sin credenciales");
+    }
+
+    const params = {
+      ...defaultParams(strategy),
+      ...(bot.params as Record<string, number>),
+    };
+    const interval = bot.interval as KlineInterval;
+    const warmup = strategy.warmup(params);
+    const trailMult = params.trailingAtr ?? 0;
+    const stopMult = params.stopAtr ?? 0;
+
+    // Facturación (solo en modo real): sin plan con modo real, o con la
+    // suscripción en pausa suave, el robot NO abre posiciones nuevas — pero
+    // stops y ventas siguen activos: la protección jamás se corta por deuda.
+    let buysBlocked = false;
+    let buysBlockedReason = "";
+    if (!isTestnet()) {
+      const ent = await getEntitlement(bot.userId);
+      if (!ent.limits.modoReal) {
+        buysBlocked = true;
+        buysBlockedReason =
+          "compras pausadas: tu plan no incluye robots en modo real";
+      } else if (ent.sellOnly) {
+        buysBlocked = true;
+        buysBlockedReason =
+          "compras pausadas por un pago pendiente (tus posiciones siguen protegidas)";
+      }
+    }
+
+    // ---- 1) Stop de protección: se chequea CADA tick contra el precio actual
+    if (
+      strategy.modo !== "dca" &&
+      bot.positionQty > 0 &&
+      bot.stopPrice !== null
+    ) {
+      const currentPrice = await getSpotPrice(bot.symbol);
+      if (currentPrice !== null && currentPrice <= bot.stopPrice) {
+        const filters = await getSymbolFilters(bot.symbol);
+        const qty = roundToStep(bot.positionQty, filters.stepSize);
+        if (qty >= filters.minQty && qty * currentPrice >= filters.minNotional) {
+          const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+            symbol: bot.symbol,
+            side: "SELL",
+            quantity: qty,
+          });
+          const reason = "Stop de protección: el precio tocó el límite de pérdida";
+          await recordTrade(bot, "SELL", order.executedQty, order.avgPrice, order.netQuoteQty, order.orderId, reason);
+          await updateBot(bot.id, {
+            lastRunAt: now,
+            lastError: null,
+            lastSignal: "stop ejecutado",
+            positionQty: 0,
+            positionAvgPrice: 0,
+            investedUsdt: 0,
+            stopPrice: null,
+            highestClose: null,
+            cooldownUntil: new Date(now.getTime() + INTERVAL_MS[interval]),
+          });
+          await notifyTrade(bot, strategy.nombre, "SELL", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
+          return out("sell", `stop ejecutado a ${order.avgPrice.toFixed(2)}`);
+        }
+      }
+    }
+
+    // ---- 2) Velas cerradas del intervalo de la estrategia
+    const candles = await getKlines(
+      bot.symbol,
+      interval,
+      Math.min(1000, warmup + 60)
+    );
+    const closed = candles.slice(0, -1); // la última sigue abierta
+    if (closed.length < warmup + 1) {
+      await updateBot(bot.id, {
+        lastRunAt: now,
+        lastError:
+          "Todavía no hay suficiente historia de precios para esta estrategia.",
+      });
+      return out("skip", "historia insuficiente");
+    }
+
+    const i = closed.length - 1;
+    const lastCandle = closed[i];
+    const price = lastCandle.close;
+
+    // ---- 3) Idempotencia atómica: reservamos la vela antes de operar.
+    // Si otra ejecución ya la tomó (o no hay vela nueva), abortamos acá —
+    // así una orden MARKET nunca se dispara dos veces por la misma señal.
+    if (bot.lastCandleTime === lastCandle.openTime) {
+      await updateBot(bot.id, { lastRunAt: now });
+      return out("hold", "sin vela nueva");
+    }
+    if (!(await claimCandle(bot.id, lastCandle.openTime))) {
+      return out("hold", "vela ya procesada por otra ejecución");
+    }
+
+    // ---- 4) Vela nueva: actualizar trailing si hay posición.
+    let stopPrice = bot.stopPrice;
+    let highestClose = bot.highestClose;
+    if (bot.positionQty > 0 && trailMult > 0 && strategy.modo !== "dca") {
+      const atrNow = atr(closed, ATR_PERIOD)[i];
+      highestClose = Math.max(highestClose ?? 0, price);
+      if (atrNow !== null && atrNow !== undefined) {
+        stopPrice = Math.max(
+          stopPrice ?? -Infinity,
+          highestClose - trailMult * atrNow
+        );
+      }
+    }
+
+    const signal = strategy.signalAt(closed, i, params);
+    const base = {
+      lastRunAt: now,
+      lastError: null as string | null,
+      lastCandleTime: lastCandle.openTime,
+      stopPrice,
+      highestClose,
+    };
+
+    // Stop inicial por ATR al abrir posición (acotado entre 3% y 20%).
+    // Sin ATR disponible: fallback fijo del 8% — si el usuario pidió stop,
+    // SIEMPRE hay stop.
+    const initialStop = (fillPrice: number): number | null => {
+      if (stopMult <= 0) return null;
+      const atrNow = atr(closed, ATR_PERIOD)[i];
+      const distPct =
+        atrNow !== null && atrNow !== undefined
+          ? Math.min(
+              STOP_MAX_PCT,
+              Math.max(STOP_MIN_PCT, (stopMult * atrNow) / fillPrice)
+            )
+          : 0.08;
+      return fillPrice * (1 - distPct);
+    };
+
+    // ---- 5a) DCA: compra periódica de monto fijo.
+    if (strategy.modo === "dca") {
+      if (buysBlocked) {
+        await updateBot(bot.id, { ...base, lastSignal: buysBlockedReason });
+        return out("hold", buysBlockedReason);
+      }
+      const everyMs =
+        INTERVAL_MS[interval] * Math.max(1, Math.round(params.cadaNVelas));
+      const due =
+        !bot.lastBuyAt || now.getTime() - bot.lastBuyAt.getTime() >= everyMs;
+      const remaining = bot.budgetUsdt - bot.investedUsdt;
+      const chunk = Math.min(
+        params.montoPorCompra ?? Math.max(10, bot.budgetUsdt / 10),
+        remaining
+      );
+
+      if (!due) {
+        await updateBot(bot.id, { ...base, lastSignal: "esperando la próxima compra" });
+        return out("hold", "todavía no toca comprar");
+      }
+      if (chunk < 10) {
+        await updateBot(bot.id, { ...base, lastSignal: "presupuesto agotado" });
+        return out("hold", "presupuesto agotado");
+      }
+      const filters = await getSymbolFilters(bot.symbol);
+      if (chunk < filters.minNotional) {
+        await updateBot(bot.id, {
+          ...base,
+          lastError: `El monto por compra (${chunk.toFixed(2)} USD) está por debajo del mínimo de Binance (${filters.minNotional} USD).`,
+        });
+        return out("skip", "monto bajo el mínimo");
+      }
+
+      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+        symbol: bot.symbol,
+        side: "BUY",
+        quoteOrderQty: chunk,
+      });
+      const reason = `Compra periódica (${strategy.nombre})`;
+      await recordTrade(bot, "BUY", order.netBaseQty, order.avgPrice, order.cummulativeQuoteQty, order.orderId, reason);
+      const totalQty = bot.positionQty + order.netBaseQty;
+      await updateBot(bot.id, {
+        ...base,
+        lastSignal: "compró",
+        positionQty: totalQty,
+        positionAvgPrice:
+          totalQty > 0
+            ? (bot.positionQty * bot.positionAvgPrice + order.cummulativeQuoteQty) / totalQty
+            : 0,
+        investedUsdt: bot.investedUsdt + order.cummulativeQuoteQty,
+        lastBuyAt: now,
+      });
+      await notifyTrade(bot, strategy.nombre, "BUY", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
+      return out("buy", `compró por ${order.cummulativeQuoteQty.toFixed(2)} USDT`);
+    }
+
+    // ---- 5b) Estrategias all-in/all-out.
+    const hasPosition = bot.positionQty * price >= 5;
+    const inCooldown =
+      bot.cooldownUntil !== null && bot.cooldownUntil.getTime() > now.getTime();
+
+    if (signal === "buy" && buysBlocked) {
+      await updateBot(bot.id, { ...base, lastSignal: buysBlockedReason });
+      return out("hold", buysBlockedReason);
+    }
+
+    if (signal === "buy" && !hasPosition && !inCooldown) {
+      const spend = bot.budgetUsdt - bot.investedUsdt;
+      const filters = await getSymbolFilters(bot.symbol);
+      if (spend < Math.max(10, filters.minNotional)) {
+        await updateBot(bot.id, {
+          ...base,
+          lastError: "No queda presupuesto suficiente para comprar.",
+        });
+        return out("skip", "sin presupuesto");
+      }
+      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+        symbol: bot.symbol,
+        side: "BUY",
+        quoteOrderQty: spend,
+      });
+      const reason = `Señal de compra (${strategy.nombre})`;
+      await recordTrade(bot, "BUY", order.netBaseQty, order.avgPrice, order.cummulativeQuoteQty, order.orderId, reason);
+      await updateBot(bot.id, {
+        ...base,
+        lastSignal: "compró",
+        positionQty: bot.positionQty + order.netBaseQty,
+        positionAvgPrice:
+          order.netBaseQty > 0
+            ? order.cummulativeQuoteQty / order.netBaseQty
+            : order.avgPrice,
+        investedUsdt: bot.investedUsdt + order.cummulativeQuoteQty,
+        lastBuyAt: now,
+        stopPrice: initialStop(order.avgPrice),
+        highestClose: order.avgPrice,
+      });
+      await notifyTrade(bot, strategy.nombre, "BUY", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
+      return out("buy", `compró por ${order.cummulativeQuoteQty.toFixed(2)} USDT`);
+    }
+
+    if (signal === "sell" && hasPosition) {
+      const filters = await getSymbolFilters(bot.symbol);
+      const qty = roundToStep(bot.positionQty, filters.stepSize);
+      if (qty < filters.minQty || qty * price < filters.minNotional) {
+        await updateBot(bot.id, {
+          ...base,
+          lastError:
+            "La posición es demasiado chica para venderla (queda como polvo).",
+        });
+        return out("skip", "posición mínima");
+      }
+      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+        symbol: bot.symbol,
+        side: "SELL",
+        quantity: qty,
+      });
+      const reason = `Señal de venta (${strategy.nombre})`;
+      await recordTrade(bot, "SELL", order.executedQty, order.avgPrice, order.netQuoteQty, order.orderId, reason);
+      await updateBot(bot.id, {
+        ...base,
+        lastSignal: "vendió",
+        positionQty: 0,
+        positionAvgPrice: 0,
+        investedUsdt: 0,
+        stopPrice: null,
+        highestClose: null,
+      });
+      await notifyTrade(bot, strategy.nombre, "SELL", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
+      return out("sell", `vendió por ${order.cummulativeQuoteQty.toFixed(2)} USDT`);
+    }
+
+    await updateBot(bot.id, {
+      ...base,
+      lastSignal:
+        signal === "hold"
+          ? hasPosition
+            ? "manteniendo la posición"
+            : "sin señal, esperando"
+          : `señal ${signal} (sin acción)`,
+    });
+    return out("hold", `señal: ${signal}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateBot(bot.id, { lastRunAt: now, lastError: message }).catch(
+      () => {}
+    );
+    return out("error", message);
+  }
+}

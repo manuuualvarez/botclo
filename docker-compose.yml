@@ -1,0 +1,62 @@
+# Producción (VPS de Hostinger): `docker compose up -d --build`
+# Todas las variables se editan en el archivo .env junto a este compose —
+# no hace falta tocar este archivo para configurar el entorno.
+name: botclo
+
+services:
+  web:
+    build:
+      context: .
+      target: runner
+      args:
+        # Las NEXT_PUBLIC_* se hornean en el bundle al buildear:
+        # si las cambiás en .env hay que rebuildear (--build).
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_CLERK_SIGN_IN_URL: ${NEXT_PUBLIC_CLERK_SIGN_IN_URL:-/sign-in}
+        NEXT_PUBLIC_CLERK_SIGN_UP_URL: ${NEXT_PUBLIC_CLERK_SIGN_UP_URL:-/sign-up}
+        NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: ${NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL:-/dashboard}
+        NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: ${NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL:-/dashboard}
+    restart: unless-stopped
+    # Solo loopback: Docker publica puertos por DEBAJO de ufw, así que
+    # "3000:3000" quedaría accesible desde internet en HTTP plano aunque el
+    # firewall solo permita 80/443. Caddy (en la misma red Docker) hace el
+    # proxy a web:3000 y termina el TLS.
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Scheduler del robot: dispara el tick de trading cada BOT_TICK_SECONDS.
+  bot:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - web
+    entrypoint: /bin/sh
+    command: >
+      -c "sleep 20; while true; do
+        curl -s -m 90 -X POST -H \"x-cron-secret: ${CRON_SECRET:-}\" http://web:3000/api/bot/tick > /dev/null 2>&1 || true;
+        sleep ${BOT_TICK_SECONDS:-60};
+      done"
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-norte}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Definí POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-norte}
+    # Sin "ports": en producción la DB solo es visible dentro de la red de Docker.
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-norte} -d ${POSTGRES_DB:-norte}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:
