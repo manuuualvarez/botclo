@@ -47,6 +47,9 @@ jobs:
     name: Deploy al VPS
     needs: build-and-push
     runs-on: ubuntu-latest
+    permissions:
+      packages: read
+      contents: read
     steps:
       - name: ¿Hay acceso SSH configurado?
         id: guard
