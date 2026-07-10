@@ -48,7 +48,15 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: ¿Hay acceso SSH configurado?
+        id: guard
+        env:
+          HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          if [ -n "$HOST" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; echo "⏭️  Falta VPS_HOST — se omite el deploy por SSH (la imagen igual quedó en GHCR)."; fi
+
       - name: Pull + up en el VPS (solo proyecto botclo)
+        if: steps.guard.outputs.ok == 'true'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
