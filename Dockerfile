@@ -71,6 +71,14 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Migraciones versionadas + script + los paquetes que el migrador necesita
+# (el output standalone no siempre traza el submódulo migrator de drizzle).
+COPY --from=builder --chown=nextjs:nodejs /app/drizzle ./drizzle
+COPY --from=builder --chown=nextjs:nodejs /app/scripts/migrate.mjs ./scripts/migrate.mjs
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules/drizzle-orm ./node_modules/drizzle-orm
+COPY --from=deps --chown=nextjs:nodejs /app/node_modules/postgres ./node_modules/postgres
+
 USER nextjs
 EXPOSE 3000
-CMD ["node", "server.js"]
+# Aplica migraciones y recién ahí levanta el server.
+CMD ["sh", "-c", "node scripts/migrate.mjs && node server.js"]

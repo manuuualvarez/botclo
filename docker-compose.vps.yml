@@ -1,0 +1,67 @@
+# Deploy en el VPS de Hostinger (srv1245135) — se integra al Traefik existente
+# del proyecto n8n. NO levanta su propio proxy ni toca puertos 80/443.
+# La imagen la buildea y publica el CI en GHCR; acá solo se hace pull + up.
+# Proyecto Docker aislado "botclo": red y volumen propios, no toca nada más.
+name: botclo
+
+services:
+  web:
+    image: ghcr.io/manuuualvarez/botclo:latest
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - "traefik.http.routers.botclo.rule=Host(`botclo.com`) || Host(`www.botclo.com`)"
+      - traefik.http.routers.botclo.entrypoints=web,websecure
+      - traefik.http.routers.botclo.tls=true
+      - traefik.http.routers.botclo.tls.certresolver=mytlschallenge
+      - traefik.http.services.botclo.loadbalancer.server.port=3000
+    networks:
+      - traefik-public
+      - default
+
+  # Scheduler del robot: dispara el tick cada BOT_TICK_SECONDS. Red interna.
+  bot:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - web
+    entrypoint: /bin/sh
+    command: >
+      -c "sleep 20; while true; do
+        curl -s -m 90 -X POST -H \"x-cron-secret: ${CRON_SECRET:-}\" http://web:3000/api/bot/tick > /dev/null 2>&1 || true;
+        sleep ${BOT_TICK_SECONDS:-60};
+      done"
+    networks:
+      - default
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-botclo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Definí POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-botclo}
+    # Sin puertos publicados: la DB solo es visible en la red interna de botclo.
+    volumes:
+      - botclo_db:/var/lib/postgresql/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-botclo} -d ${POSTGRES_DB:-botclo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+# traefik-public es la red externa que ya usa el Traefik del n8n.
+networks:
+  traefik-public:
+    external: true
+  default:
+
+volumes:
+  botclo_db:

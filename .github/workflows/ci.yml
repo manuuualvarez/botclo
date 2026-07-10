@@ -1,0 +1,83 @@
+name: CI
+
+# Semáforo del PR: corre en cada PR a main y en pushes a main.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    name: Lint · Types · Build · Tests
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ job.status }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Chequeo de tipos
+        run: pnpm exec tsc --noEmit
+
+      - name: Tests de lógica (crypto, estrategias, facturación)
+        run: pnpm test:ci
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Valores dummy: el build no contacta servicios, solo necesita que
+          # las variables existan para no romper.
+          NEXT_PUBLIC_APP_URL: https://botclo.com
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2ktYnVpbGQ
+          CLERK_SECRET_KEY: sk_test_ci_build_placeholder
+          ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+
+  # Deja un comentario en el PR con el semáforo del resultado.
+  comentario:
+    name: Comentar estado en el PR
+    needs: checks
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const ok = "${{ needs.checks.result }}" === "success";
+            const cuerpo = ok
+              ? "## 🟢 Checks en verde\n\n✅ Lint · ✅ Tipos · ✅ Tests · ✅ Build\n\nEste PR está listo para mergear."
+              : "## 🔴 Checks fallaron\n\nRevisá el detalle en la pestaña **Checks** antes de mergear.";
+            const marca = "<!-- botclo-ci-status -->";
+            const { data: comentarios } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const previo = comentarios.find((c) => c.body.includes(marca));
+            const body = `${marca}\n${cuerpo}`;
+            if (previo) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: previo.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }

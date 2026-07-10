@@ -10,6 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test:ci": "tsx tests/unit.mts",
     "db:push": "drizzle-kit push",
     "db:push:docker": "docker compose -f docker-compose.dev.yml exec web pnpm db:push",
     "prod": "docker compose up -d --build",
@@ -41,7 +43,6 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "shadcn": "^4.13.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -49,7 +50,9 @@
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
+    "shadcn": "^4.13.0",
     "tailwindcss": "^4",
+    "tsx": "^4.23.0",
     "typescript": "^5"
   },
   "pnpm": {

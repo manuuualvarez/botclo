@@ -80,16 +80,10 @@ que intentás pagar es de prueba"*.
 
 ### Cuenta compradora de prueba (dinero 100% ficticio)
 
-| Campo | Valor |
-|---|---|
-| Usuario | `TESTUSER1053437672907625553` |
-| Contraseña | `D5XJScVXYH` |
-| Código de verificación | `949183` |
-| User ID | `2979949183` |
-| Email (para `MP_TEST_PAYER_EMAIL`) | `test_user_1053437672907625553@testuser.com` |
-
-> Se gestiona desde el panel de la app → **Cuentas de prueba**. El email es
-> `test_user_` + los dígitos del nickname + `@testuser.com`, y va en
+> ⚠️ Las credenciales de la cuenta compradora de prueba (usuario, contraseña,
+> email) **NO se versionan** — este repo es público. Se generan y consultan
+> desde el panel de MercadoPago → app **NorteInversiones** → **Cuentas de
+> prueba**. El email de esa cuenta (formato `test_user_…@testuser.com`) va en
 > `MP_TEST_PAYER_EMAIL` del `.env`: el checkout de **suscripciones** lo exige
 > como pagador al crearlas (el pago único anual no lo necesita).
 
