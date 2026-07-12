@@ -20,6 +20,7 @@ import { createBotAction } from "@/app/dashboard/robot/actions";
 import { RealRiskModal } from "@/components/bot/real-risk-modal";
 import { BACKTEST_SYMBOLS } from "@/lib/backtest";
 import { formatUsd, humanizeCandles } from "@/lib/format";
+import { INTERVAL_LABELS, type KlineInterval } from "@/lib/intervals";
 
 interface StrategyOption {
   id: string;
@@ -38,13 +39,6 @@ interface StrategyOption {
   }[];
 }
 
-// El intervalo lo define la estrategia (es el único con el que fue
-// backtesteada); acá solo se muestra en lenguaje claro.
-const INTERVAL_LABELS: Record<string, string> = {
-  "1h": "Cada hora",
-  "4h": "Cada 4 horas",
-  "1d": "Una vez por día",
-};
 
 const BUDGET_PRESETS = [
   { label: "25%", fraction: 0.25 },
@@ -205,7 +199,7 @@ export function BotSetup({
             <div className="flex flex-col gap-2">
               <Label>Frecuencia de decisión</Label>
               <div className="flex h-9 items-center rounded-md border border-input bg-transparent px-3 text-sm">
-                {INTERVAL_LABELS[interval] ?? interval}
+                {INTERVAL_LABELS[interval as KlineInterval] ?? interval}
               </div>
               <p className="text-xs text-muted-foreground">
                 La define la estrategia: es la misma frecuencia con la que se

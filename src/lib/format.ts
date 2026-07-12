@@ -1,5 +1,7 @@
 // Formateo es-AR: "US$ 1.234,56" — familiar para el público argentino.
 
+import { INTERVAL_MS, type KlineInterval } from "@/lib/intervals";
+
 const usd = new Intl.NumberFormat("es-AR", {
   style: "currency",
   currency: "USD",
@@ -36,14 +38,9 @@ export function formatPct(value: number): string {
 
 // Traduce "N velas de tal intervalo" a tiempo humano: la unidad "velas" no
 // le dice nada a un usuario no técnico.
-const HOURS_PER_INTERVAL: Record<string, number> = {
-  "1h": 1,
-  "4h": 4,
-  "1d": 24,
-};
-
 export function humanizeCandles(count: number, interval: string): string {
-  const hours = count * (HOURS_PER_INTERVAL[interval] ?? 24);
+  const intervalMs = INTERVAL_MS[interval as KlineInterval] ?? INTERVAL_MS["1d"];
+  const hours = count * (intervalMs / 3_600_000);
   if (!Number.isFinite(hours) || hours <= 0) return "";
   if (hours < 48) {
     const h = Math.round(hours);

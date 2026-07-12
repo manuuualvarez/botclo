@@ -10,7 +10,7 @@ import { encrypt, decrypt } from "@/lib/crypto";
 import { sma, rsi, ema, atr, macd, roc, rollingStd, highestHigh } from "@/lib/strategies/indicators";
 import { strategies, defaultParams, evalSignal, getStrategy, signalWindow } from "@/lib/strategies";
 import { initialStop, trailedStop } from "@/lib/risk";
-import { dcaChunk, dcaDue } from "@/lib/bot/decisions";
+import { clampDcaChunk, dcaChunk, dcaDue, investedAfterSell } from "@/lib/bot/decisions";
 import { runBacktest } from "@/lib/backtest";
 import { commissionIn, getKlinesPaged } from "@/lib/binance/client";
 import { rateLimit } from "@/lib/rate-limit";
@@ -82,8 +82,22 @@ check("DCA due sin compra previa", dcaDue(null, hoy, dia, 7));
 check("DCA no due a los 6 días", !dcaDue(new Date(hoy.getTime() - 6 * dia), hoy, dia, 7));
 check("DCA due a los 7 días", dcaDue(new Date(hoy.getTime() - 7 * dia), hoy, dia, 7));
 check("chunk default = presupuesto/10", dcaChunk(undefined, 1000, 0) === 100);
-check("chunk default nunca menor a 10", dcaChunk(undefined, 50, 0) === 10);
+check("chunk default nunca menor al piso (11)", dcaChunk(undefined, 50, 0) === 11);
 check("chunk acotado por lo que queda", dcaChunk(200, 1000, 950) === 50);
+check(
+  "clamp del chunk: mismo en lab y robot",
+  clampDcaChunk(undefined, 1000) === 100 && clampDcaChunk(5, 1000) === 11 && clampDcaChunk(5000, 1000) === 1000
+);
+check(
+  "las pérdidas achican el presupuesto; las ganancias no lo agrandan",
+  investedAfterSell(500, 400) === 100 && investedAfterSell(500, 600) === 0
+);
+// Paridad de sizing tras una pérdida de 100: el backtest gasta min(cash,
+// capital) = 400 y el ejecutor budget − investedAfterSell = 400.
+check(
+  "paridad de sizing tras pérdidas",
+  500 - investedAfterSell(500, 400) === Math.min(500 - 100, 500)
+);
 
 // --- Comisiones ---
 const fills = [{ commission: "0.001", commissionAsset: "BTC" }, { commission: "1.25", commissionAsset: "USDT" }];
@@ -173,6 +187,13 @@ check("DCA: respeta el calendario (cada 5 velas)", dcaR.trades[1].time - dcaR.tr
 check("DCA: sin plata nueva tras agotar el presupuesto", dcaR.trades[9].time === flat400[46].closeTime);
 const dcaCustom = runBacktest(flat400, getStrategy("dca")!, { cadaNVelas: 5, montoPorCompra: 250 }, { initialCapitalUsd: 1000, feePct: 0, slippagePct: 0 });
 check("DCA: monto por compra personalizado", dcaCustom.trades.length === 4 && Math.abs(dcaCustom.trades[0].valueUsd - 250) < 1e-9);
+let dcaEvalThrew = false;
+try {
+  evalSignal(getStrategy("dca")!, flat400, 300, defaultParams(getStrategy("dca")!));
+} catch {
+  dcaEvalThrew = true;
+}
+check("evalSignal rechaza DCA (cadencia de calendario, no señal)", dcaEvalThrew);
 
 // --- Paginación de historia larga (getKlinesPaged con fetcher falso, sin
 // red): lotes contiguos hacia atrás, sin huecos ni duplicados.

@@ -1,18 +1,23 @@
 import { and, eq, sql } from "drizzle-orm";
-import { db } from "@/db";
+import { db, pg } from "@/db";
 import { botConfigs, botTrades } from "@/db/schema";
 import {
+  BinanceApiError,
   getKlines,
   getSpotPrice,
   getSymbolFilters,
   isTestnet,
   placeMarketOrder,
   roundToStep,
-  type KlineInterval,
 } from "@/lib/binance/client";
 import { getDecryptedCredentials } from "@/lib/binance/credentials";
 import { capturePortfolioSnapshot } from "@/lib/binance/portfolio";
-import { dcaChunk, dcaDue } from "@/lib/bot/decisions";
+import {
+  dcaChunk,
+  dcaDue,
+  investedAfterSell,
+} from "@/lib/bot/decisions";
+import { INTERVAL_MS, type KlineInterval } from "@/lib/intervals";
 import { getEntitlement } from "@/lib/plan";
 import { atrAt, ATR_WINDOW, initialStop, trailedStop } from "@/lib/risk";
 import {
@@ -39,56 +44,57 @@ export interface TickOutcome {
   detail: string;
 }
 
-const INTERVAL_MS: Record<KlineInterval, number> = {
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "1d": 86_400_000,
-};
-
 // Lock global del tick: si un barrido tarda más que el intervalo del
 // scheduler, el siguiente `curl` no arranca en paralelo. Un solo tick
 // procesa los bots a la vez; los demás salen sin hacer nada.
 const TICK_LOCK_KEY = 918_273_645;
 
+// Prefijo del lastError de una venta en reintento. La dedup de alertas de
+// Telegram compara contra ESTA constante — no reescribir el texto en un solo
+// lado, o el usuario recibe una alerta por tick.
+const SELL_RETRY_PREFIX = "La venta falló y se va a reintentar";
+
 export async function runAllActiveBots(): Promise<TickOutcome[]> {
-  // Lock de TRANSACCIÓN (no de sesión): con un pool de conexiones, el lock y
-  // el unlock de sesión pueden caer en conexiones distintas — el unlock falla
-  // en silencio y el lock queda tomado para siempre, matando todos los ticks
-  // siguientes (ni señales ni chequeo de stops). El de transacción vive y
-  // muere con la conexión de ESTA transacción, pase lo que pase.
-  return db.transaction(async (tx) => {
-    // El barrido incluye llamadas HTTP a Binance: la transacción queda idle
-    // mientras tanto. Si el Postgres del hosting trae
-    // idle_in_transaction_session_timeout, abortaría el tick a mitad de
-    // camino — lo desactivamos SOLO para esta transacción.
-    await tx.execute(
-      sql`SET LOCAL idle_in_transaction_session_timeout = 0`
-    );
-    const [{ locked }] = (await tx.execute(
-      sql`SELECT pg_try_advisory_xact_lock(${TICK_LOCK_KEY}) AS locked`
-    )) as unknown as { locked: boolean }[];
+  // Lock de sesión sobre una conexión RESERVADA: lock y unlock viven
+  // garantizados en la MISMA conexión (a través del pool podían caer en
+  // conexiones distintas — el unlock fallaba en silencio y el lock quedaba
+  // tomado para siempre, matando todos los ticks siguientes). Si el proceso
+  // muere, el socket se cierra y Postgres libera el lock solo. No queda
+  // ninguna transacción abierta durante el barrido (que incluye llamadas
+  // HTTP): el resto de las queries usa el pool normal.
+  const reserved = await pg.reserve();
+  try {
+    const [{ locked }] = (await reserved`
+      SELECT pg_try_advisory_lock(${TICK_LOCK_KEY}) AS locked
+    `) as unknown as { locked: boolean }[];
     if (!locked) return [];
 
-    const bots = await db
-      .select()
-      .from(botConfigs)
-      .where(eq(botConfigs.status, "active"));
+    try {
+      const bots = await db
+        .select()
+        .from(botConfigs)
+        .where(eq(botConfigs.status, "active"));
 
-    const outcomes: TickOutcome[] = [];
-    for (const bot of bots) {
-      outcomes.push(await runBotTick(bot));
-    }
-
-    // Snapshot del valor de cartera por usuario (throttled a 1/hora adentro).
-    for (const userId of new Set(bots.map((b) => b.userId))) {
-      try {
-        await capturePortfolioSnapshot(userId);
-      } catch {
-        // el snapshot nunca debe romper el tick
+      const outcomes: TickOutcome[] = [];
+      for (const bot of bots) {
+        outcomes.push(await runBotTick(bot));
       }
+
+      // Snapshot del valor de cartera por usuario (throttled a 1/hora adentro).
+      for (const userId of new Set(bots.map((b) => b.userId))) {
+        try {
+          await capturePortfolioSnapshot(userId);
+        } catch {
+          // el snapshot nunca debe romper el tick
+        }
+      }
+      return outcomes;
+    } finally {
+      await reserved`SELECT pg_advisory_unlock(${TICK_LOCK_KEY})`;
     }
-    return outcomes;
-  });
+  } finally {
+    reserved.release();
+  }
 }
 
 async function updateBot(
@@ -164,7 +170,7 @@ async function notifyAlert(bot: BotConfig, text: string) {
   }
 }
 
-// Aviso por Telegram (si el usuario lo configuró). Nunca rompe el trade.
+// Aviso de operación por Telegram: arma el mensaje y delega el envío.
 async function notifyTrade(
   bot: BotConfig,
   strategyName: string,
@@ -174,30 +180,22 @@ async function notifyTrade(
   quoteQty: number,
   reason: string
 ) {
-  try {
-    const creds = await getTelegramCredentials(bot.userId);
-    if (!creds) return;
-    const modo = isTestnet()
-      ? "🧪 <b>MODO PRÁCTICA (testnet)</b>"
-      : "💰 <b>DINERO REAL</b>";
-    const encabezado =
-      side === "BUY" ? "🟢 <b>COMPRA</b>" : "🔴 <b>VENTA</b>";
-    await sendTelegramMessage(
-      creds.token,
-      creds.chatId,
-      [
-        modo,
-        `${encabezado} ${bot.symbol}`,
-        `Cantidad: ${qty}`,
-        `Precio: ${usd.format(price)}`,
-        `Total: ${usd.format(quoteQty)}`,
-        `Estrategia: ${strategyName}`,
-        `Motivo: ${reason}`,
-      ].join("\n")
-    );
-  } catch {
-    // sin Telegram no pasa nada
-  }
+  const modo = isTestnet()
+    ? "🧪 <b>MODO PRÁCTICA (testnet)</b>"
+    : "💰 <b>DINERO REAL</b>";
+  const encabezado = side === "BUY" ? "🟢 <b>COMPRA</b>" : "🔴 <b>VENTA</b>";
+  await notifyAlert(
+    bot,
+    [
+      modo,
+      `${encabezado} ${bot.symbol}`,
+      `Cantidad: ${qty}`,
+      `Precio: ${usd.format(price)}`,
+      `Total: ${usd.format(quoteQty)}`,
+      `Estrategia: ${strategyName}`,
+      `Motivo: ${reason}`,
+    ].join("\n")
+  );
 }
 
 export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
@@ -252,6 +250,21 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     }
 
     // ---- 1) Stop de protección: se chequea CADA tick contra el precio actual
+    // Cierra la posición en DB sin orden (polvo invendible, o el saldo ya no
+    // existe en Binance): el robot no puede quedarse "sosteniendo" algo que
+    // no puede vender — quedaría congelado para siempre. Lo invertido queda
+    // consumido: la pérdida achica el presupuesto, jamás se repone.
+    const clearPosition = (extra: Partial<typeof botConfigs.$inferInsert>) =>
+      updateBot(bot.id, {
+        lastRunAt: now,
+        positionQty: 0,
+        positionAvgPrice: 0,
+        stopPrice: null,
+        highestClose: null,
+        cooldownUntil: new Date(now.getTime() + INTERVAL_MS[interval]),
+        ...extra,
+      });
+
     if (
       strategy.modo !== "dca" &&
       bot.positionQty > 0 &&
@@ -262,36 +275,47 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
         const filters = await getSymbolFilters(bot.symbol);
         const qty = roundToStep(bot.positionQty, filters.stepSize);
         if (qty >= filters.minQty && qty * currentPrice >= filters.minNotional) {
-          const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
-            symbol: bot.symbol,
-            side: "SELL",
-            quantity: qty,
-          });
+          let order;
+          try {
+            order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+              symbol: bot.symbol,
+              side: "SELL",
+              quantity: qty,
+            });
+          } catch (error) {
+            // Binance no encuentra el saldo: la posición de la DB está
+            // desincronizada (venta manual, retiro). Cerrarla acá — si no,
+            // el stop se reintentaría para siempre contra monedas que no
+            // existen. Cualquier otro error se propaga y se reintenta.
+            if (error instanceof BinanceApiError && error.code === -2010) {
+              const msg =
+                "No se pudo ejecutar el stop: Binance no encuentra el saldo (¿vendiste o moviste las monedas a mano?). El robot dio la posición por cerrada.";
+              await notifyAlert(bot, `⚠️ ${bot.symbol}: ${msg}`);
+              await clearPosition({ lastError: msg, lastSignal: "posición desincronizada" });
+              return out("error", "stop imposible: posición desincronizada, cerrada");
+            }
+            throw error;
+          }
           const reason = "Stop de protección: el precio tocó el límite de pérdida";
           await recordTrade(bot, "SELL", order.executedQty, order.avgPrice, order.netQuoteQty, order.orderId, reason);
-          await updateBot(bot.id, {
-            lastRunAt: now,
+          await clearPosition({
             lastError: null,
             lastSignal: "stop ejecutado",
-            positionQty: 0,
-            positionAvgPrice: 0,
-            investedUsdt: 0,
-            stopPrice: null,
-            highestClose: null,
-            cooldownUntil: new Date(now.getTime() + INTERVAL_MS[interval]),
+            investedUsdt: investedAfterSell(bot.investedUsdt, order.netQuoteQty),
           });
           await notifyTrade(bot, strategy.nombre, "SELL", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
           return out("sell", `stop ejecutado a ${order.avgPrice.toFixed(2)}`);
         }
-        // Stop activado pero posición polvo: avisar en vez de saltearlo en
-        // silencio tick tras tick (Telegram solo la primera vez).
+        // Stop activado pero la posición es polvo invendible: se da por
+        // cerrada (el polvo queda en la cuenta) para que el robot siga
+        // operando en vez de quedar congelado. Telegram avisa una vez.
         const dustMsg =
-          "El stop se activó, pero la posición es demasiado chica para venderla (queda como polvo en tu cuenta).";
+          "El stop se activó, pero la posición era demasiado chica para venderla: quedó como polvo en tu cuenta y el robot la dio por cerrada.";
         if (bot.lastError !== dustMsg) {
           await notifyAlert(bot, `⚠️ ${bot.symbol}: ${dustMsg}`);
         }
-        await updateBot(bot.id, { lastRunAt: now, lastError: dustMsg });
-        return out("skip", "stop activado con posición polvo");
+        await clearPosition({ lastError: dustMsg, lastSignal: "stop con posición polvo" });
+        return out("skip", "stop con posición polvo: posición cerrada");
       }
     }
 
@@ -343,7 +367,10 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
       );
     }
 
-    const signal = evalSignal(strategy, closed, i, params);
+    // El DCA no tiene señal: su cadencia es de calendario (evalSignal lo
+    // rechaza a propósito).
+    const signal =
+      strategy.modo === "dca" ? "hold" : evalSignal(strategy, closed, i, params);
     const base = {
       lastRunAt: now,
       lastError: null as string | null,
@@ -473,12 +500,35 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
           quantity: qty,
         });
       } catch (error) {
-        // Una señal de venta NUNCA se descarta: devolvemos la vela reclamada
-        // para que el próximo tick la reintente. (Una compra fallida puede
-        // esperar a la señal siguiente; una venta fallida dejaría la posición
-        // sin salida.) Telegram avisa solo en la primera falla, no por tick.
-        const message = error instanceof Error ? error.message : String(error);
-        if (!bot.lastError?.startsWith("La venta falló")) {
+        // Posición desincronizada (venta manual, retiro): reintentar sería
+        // pedirle a Binance para siempre monedas que no existen — se cierra.
+        if (error instanceof BinanceApiError && error.code === -2010) {
+          const msg =
+            "No se pudo vender: Binance no encuentra el saldo (¿vendiste o moviste las monedas a mano?). El robot dio la posición por cerrada.";
+          await notifyAlert(bot, `⚠️ ${bot.symbol}: ${msg}`);
+          await updateBot(bot.id, {
+            ...base,
+            lastError: msg,
+            lastSignal: "posición desincronizada",
+            positionQty: 0,
+            positionAvgPrice: 0,
+            stopPrice: null,
+            highestClose: null,
+          });
+          return out("error", "venta imposible: posición desincronizada, cerrada");
+        }
+        // Cualquier otra falla: una señal de venta NUNCA se descarta —
+        // devolvemos la vela reclamada para que el próximo tick reintente.
+        // (Una compra fallida puede esperar a la señal siguiente; una venta
+        // fallida dejaría la posición sin salida.) Telegram avisa solo en la
+        // primera falla, no por tick.
+        const message =
+          error instanceof BinanceApiError
+            ? error.friendlyMessage
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        if (!bot.lastError?.startsWith(SELL_RETRY_PREFIX)) {
           await notifyAlert(
             bot,
             `⚠️ ${bot.symbol}: la venta falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
@@ -489,7 +539,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
           .set({
             lastCandleTime: bot.lastCandleTime,
             lastRunAt: now,
-            lastError: `La venta falló y se va a reintentar: ${message}`,
+            lastError: `${SELL_RETRY_PREFIX}: ${message}`,
             updatedAt: new Date(),
           })
           .where(
@@ -507,7 +557,9 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
         lastSignal: "vendió",
         positionQty: 0,
         positionAvgPrice: 0,
-        investedUsdt: 0,
+        // Lo que se perdió en esta ronda queda consumido del presupuesto —
+        // el robot no repone plata del wallet (misma regla que el backtest).
+        investedUsdt: investedAfterSell(bot.investedUsdt, order.netQuoteQty),
         stopPrice: null,
         highestClose: null,
       });

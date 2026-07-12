@@ -9,6 +9,8 @@ import {
   rsi,
   sma,
 } from "@/lib/strategies/indicators";
+import { dcaEveryMs } from "@/lib/bot/decisions";
+import { INTERVAL_MS } from "@/lib/intervals";
 import { defaultParams, getStrategy, signalWindow } from "@/lib/strategies";
 import type { BotConfig } from "./executor";
 
@@ -104,10 +106,10 @@ export async function getBotInsight(bot: BotConfig): Promise<string | null> {
         return `Tendencia de fondo: ${price > trend ? "ALCISTA (habilitado)" : "bajista — el robot espera afuera"} · RSI: ${num.format(value)} (compra cuando recupera ${params.rsiEntrada}).`;
       }
       case "dca": {
-        const everyMs =
-          { "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000 }[
-            strategy.intervalo
-          ] * Math.max(1, Math.round(params.cadaNVelas));
+        const everyMs = dcaEveryMs(
+          INTERVAL_MS[strategy.intervalo],
+          params.cadaNVelas
+        );
         const next = bot.lastBuyAt
           ? new Date(bot.lastBuyAt.getTime() + everyMs)
           : new Date();

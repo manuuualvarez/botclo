@@ -56,13 +56,18 @@ export function signalWindow(
 }
 
 // Única puerta de entrada a signalAt para el backtest y el ejecutor.
-// No aplica a modo "dca": ahí la decisión es de calendario, no de señal.
 export function evalSignal(
   strategy: Strategy,
   candles: Candle[],
   i: number,
   params: Record<string, number>
 ): Signal {
+  if (strategy.modo === "dca") {
+    // La cadencia del DCA es de calendario, no de señal: pasarla por acá
+    // remaparía el índice a la ventana y rompería en silencio. Que falle
+    // fuerte.
+    throw new Error("evalSignal no aplica a estrategias DCA (modo calendario)");
+  }
   const w = signalWindow(strategy, params);
   const start = i + 1 - w;
   if (start <= 0) return strategy.signalAt(candles, i, params);

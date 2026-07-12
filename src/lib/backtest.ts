@@ -25,15 +25,6 @@ export const BACKTEST_PERIODS = [
   { value: "2a", label: "Últimos 2 años", days: 730 },
 ] as const;
 
-// Velas que entran en un día según el intervalo: el período elegido se
-// traduce a CANTIDAD DE VELAS del intervalo real de la estrategia (si no,
-// "6 meses" de una estrategia de 1 h serían apenas 7 días de datos).
-export const CANDLES_PER_DAY: Record<"1h" | "4h" | "1d", number> = {
-  "1h": 24,
-  "4h": 6,
-  "1d": 1,
-};
-
 // Slippage estimado de una orden MARKET chica, por lado (además del fee).
 export function slippageFor(symbol: string): number {
   return symbol.startsWith("BTC") || symbol.startsWith("ETH") ? 0.05 : 0.1;
@@ -184,12 +175,10 @@ export function runBacktest(
 
       if (strategy.modo === "dca") {
         // Calendario del DCA (no hay señal): el mismo chunk y el mismo tope
-        // de presupuesto que usa el robot en vivo.
+        // de presupuesto que usa el robot en vivo. dcaChunk ya acota por lo
+        // que queda del presupuesto (= cash, porque el DCA nunca vende).
         if ((i - warmup) % every === 0) {
-          const spend = Math.min(
-            dcaChunk(params.montoPorCompra, capital, capital - cash),
-            cash
-          );
+          const spend = dcaChunk(params.montoPorCompra, capital, capital - cash);
           if (spend >= 10) executeBuy(i, spend, "Compra periódica");
         }
       } else {
@@ -197,10 +186,13 @@ export function runBacktest(
         //    misma decisión, con los mismos datos, que toma el ejecutor.
         const signal: Signal = evalSignal(strategy, candles, i, params);
 
-        if (signal === "buy" && qty === 0 && cash > 0.01 && i >= cooldownUntil) {
-          // El robot opera con presupuesto fijo: las ganancias de rondas
-          // anteriores no se reinvierten.
-          executeBuy(i, Math.min(cash, capital), "Señal de compra");
+        // El robot opera con presupuesto fijo: las ganancias no se
+        // reinvierten, y las pérdidas achican lo que se puede gastar
+        // (misma regla que investedAfterSell en el ejecutor). Bajo 10 USD
+        // el robot real tampoco compra (mínimo de Binance).
+        const spend = Math.min(cash, capital);
+        if (signal === "buy" && qty === 0 && spend >= 10 && i >= cooldownUntil) {
+          executeBuy(i, spend, "Señal de compra");
         } else if (signal === "sell" && qty > 0) {
           executeSell(i, candle.close * (1 - slip), "Señal de venta");
         }

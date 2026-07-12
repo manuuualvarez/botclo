@@ -11,12 +11,13 @@ import { getDecryptedCredentials } from "@/lib/binance/credentials";
 import {
   BACKTEST_PERIODS,
   BACKTEST_SYMBOLS,
-  CANDLES_PER_DAY,
   runBacktest,
   slippageFor,
   type BacktestResult,
   type EquityPoint,
 } from "@/lib/backtest";
+import { clampDcaChunk } from "@/lib/bot/decisions";
+import { candlesPerDay } from "@/lib/intervals";
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
 import { backtestUsage } from "@/db/schema";
@@ -60,6 +61,10 @@ function thinEquityCurve(curve: EquityPoint[], maxPoints = 1500): EquityPoint[] 
   }
   return out;
 }
+
+const PERIOD_DAYS = Object.fromEntries(
+  BACKTEST_PERIODS.map((p) => [p.value, p.days])
+) as Record<(typeof BACKTEST_PERIODS)[number]["value"], number>;
 
 const inputSchema = z.object({
   strategyId: z.string(),
@@ -126,27 +131,22 @@ export async function runBacktestAction(
     const raw = parsed.data.params[def.key] ?? def.default;
     params[def.key] = Math.min(def.max, Math.max(def.min, raw));
   }
-  // DCA: el monto por compra se clampea igual que al crear un robot
-  // (robot/actions.ts) — así el laboratorio simula el chunk real y no
-  // siempre el default de capital/10.
+  // DCA: el monto por compra se clampea con la MISMA función que al crear
+  // un robot — así el laboratorio simula el chunk real.
   if (strategy.modo === "dca") {
-    const chunk = parsed.data.params.montoPorCompra;
-    params.montoPorCompra = Math.min(
-      parsed.data.capital,
-      Math.max(11, Number.isFinite(chunk) ? chunk : parsed.data.capital / 10)
+    params.montoPorCompra = clampDcaChunk(
+      parsed.data.params.montoPorCompra,
+      parsed.data.capital
     );
   }
 
   try {
     // El período se traduce a velas del intervalo REAL de la estrategia:
     // "6 meses" de una estrategia de 1 h son ~4380 velas, no 182.
-    const days = BACKTEST_PERIODS.find(
-      (p) => p.value === parsed.data.period
-    )!.days;
     const raw = await getKlinesPaged(
       `${parsed.data.symbol}USDT`,
       strategy.intervalo,
-      days * CANDLES_PER_DAY[strategy.intervalo] + 1
+      PERIOD_DAYS[parsed.data.period] * candlesPerDay(strategy.intervalo) + 1
     );
     // La última vela viene en formación: se descarta, igual que el ejecutor.
     const candles = raw.slice(0, -1);

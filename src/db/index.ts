@@ -11,3 +11,8 @@ const conn =
 if (process.env.NODE_ENV !== "production") globalForDb.pgConn = conn;
 
 export const db = drizzle(conn, { schema });
+
+// Conexión cruda de postgres.js: `pg.reserve()` da una conexión dedicada,
+// necesaria para locks de sesión (lock y unlock DEBEN ir por la misma
+// conexión — a través del pool pueden caer en conexiones distintas).
+export const pg = conn;

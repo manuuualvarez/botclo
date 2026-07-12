@@ -73,13 +73,20 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
   con presupuesto propio): cada tick chequea stops contra el precio actual,
   y al cierre de vela nueva evalúa la señal (idempotente vía
   last_candle_time) y ejecuta a lo sumo una orden MARKET. El lock del tick es
-  `pg_try_advisory_xact_lock` DENTRO de una transacción (con pool, el lock de
-  sesión puede quedar tomado para siempre). Una VENTA fallida devuelve la
-  vela reclamada y se reintenta el próximo tick (jamás se descarta); una
-  compra fallida espera a la señal siguiente. El intervalo del robot es el de
-  la estrategia (único backtesteado) — no se elige. Decisiones puras
-  testeables en `src/lib/bot/decisions.ts`. Notifica cada operación por
-  Telegram si el usuario lo configuró (token cifrado en DB).
+  de sesión sobre una conexión RESERVADA (`pg.reserve()`): lock y unlock en
+  la misma conexión garantizado, sin transacción abierta durante el barrido
+  (a través del pool el lock podía quedar tomado para siempre). Una VENTA
+  fallida devuelve la vela reclamada y se reintenta el próximo tick (jamás
+  se descarta); si Binance no encuentra el saldo (-2010, posición
+  desincronizada) o la posición es polvo invendible, se da por cerrada con
+  alerta — el robot nunca queda congelado. Una compra fallida espera a la
+  señal siguiente. Las pérdidas achican el presupuesto (investedAfterSell):
+  el robot jamás repone plata del wallet — misma regla que el backtest. El
+  intervalo del robot es el de la estrategia (único backtesteado) — no se
+  elige, y el ejecutor lo deriva de la estrategia aunque la fila diga otra
+  cosa. Decisiones puras testeables en `src/lib/bot/decisions.ts`; intervalos
+  (ms/velas/etiquetas) SOLO desde `src/lib/intervals.ts`. Notifica cada
+  operación por Telegram si el usuario lo configuró (token cifrado en DB).
   `POST /api/bot/tick` (público en proxy, autentica CRON_SECRET); el servicio
   `bot` del compose lo dispara cada BOT_TICK_SECONDS.
 - `src/lib/bot/insight.ts` — "qué está mirando el robot" en lenguaje claro.

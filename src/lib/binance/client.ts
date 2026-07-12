@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import type { KlineInterval } from "@/lib/intervals";
 import type { Candle } from "../strategies/types";
 
 // Datos de cuenta (saldos, órdenes): testnet o producción según .env.
@@ -173,7 +174,7 @@ function toTicker(raw: RawTicker): Ticker {
   };
 }
 
-export type KlineInterval = "1h" | "4h" | "1d";
+export type { KlineInterval } from "@/lib/intervals";
 
 // Precio spot al instante (sin caché): lo usa el chequeo de stops del robot.
 export async function getSpotPrice(symbol: string): Promise<number | null> {

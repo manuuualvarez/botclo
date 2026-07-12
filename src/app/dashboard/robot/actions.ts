@@ -9,6 +9,7 @@ import { botConfigs } from "@/db/schema";
 import { BACKTEST_SYMBOLS } from "@/lib/backtest";
 import { isTestnet } from "@/lib/binance/client";
 import { hasCredentials } from "@/lib/binance/credentials";
+import { clampDcaChunk } from "@/lib/bot/decisions";
 import { runBotTick } from "@/lib/bot/executor";
 import { recordAcceptance } from "@/lib/legal";
 import { getEntitlement } from "@/lib/plan";
@@ -102,10 +103,9 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
     params[def.key] = Math.min(def.max, Math.max(def.min, raw));
   }
   if (strategy.modo === "dca") {
-    const chunk = parsed.data.params.montoPorCompra;
-    params.montoPorCompra = Math.min(
-      parsed.data.budget,
-      Math.max(11, Number.isFinite(chunk) ? chunk : parsed.data.budget / 10)
+    params.montoPorCompra = clampDcaChunk(
+      parsed.data.params.montoPorCompra,
+      parsed.data.budget
     );
   }
 

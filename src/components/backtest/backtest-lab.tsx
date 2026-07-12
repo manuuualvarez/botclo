@@ -26,6 +26,7 @@ import {
   type RunBacktestState,
 } from "@/app/dashboard/estrategias/[id]/actions";
 import { BACKTEST_PERIODS, BACKTEST_SYMBOLS } from "@/lib/backtest";
+import { dcaChunk, MIN_DCA_CHUNK_USD } from "@/lib/bot/decisions";
 import { formatUsd, humanizeCandles } from "@/lib/format";
 import type { StrategyParam } from "@/lib/strategies/types";
 
@@ -176,8 +177,8 @@ export function BacktestLab({ strategyId, params, intervalo, modo }: Props) {
                 <Input
                   id="montoPorCompra"
                   type="number"
-                  min={11}
-                  placeholder={`${Math.max(11, Math.round(Number(capital) / 10 || 0))} (el robot usa capital ÷ 10)`}
+                  min={MIN_DCA_CHUNK_USD}
+                  placeholder={`${Math.round(dcaChunk(undefined, Number(capital) || 0, 0))} (el robot usa capital ÷ 10)`}
                   value={chunk}
                   onChange={(e) => setChunk(e.target.value)}
                 />
