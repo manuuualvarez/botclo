@@ -55,3 +55,6 @@ jobs:
             3. Los hallazgos priorizados (archivo:línea), solo los que importan
             Si no hay hallazgos, decílo y poné 🟢. Sé conciso y concreto.
           claude_args: "--max-turns 20"
+          # Muestra la salida completa (incluye el error real de la API) en el
+          # log del job — sin esto, una key inválida falla en silencio.
+          show_full_output: true
