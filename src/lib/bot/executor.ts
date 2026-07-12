@@ -12,9 +12,15 @@ import {
 } from "@/lib/binance/client";
 import { getDecryptedCredentials } from "@/lib/binance/credentials";
 import { capturePortfolioSnapshot } from "@/lib/binance/portfolio";
+import { dcaChunk, dcaDue } from "@/lib/bot/decisions";
 import { getEntitlement } from "@/lib/plan";
-import { atr } from "@/lib/strategies/indicators";
-import { defaultParams, getStrategy } from "@/lib/strategies";
+import { atrAt, ATR_WINDOW, initialStop, trailedStop } from "@/lib/risk";
+import {
+  defaultParams,
+  evalSignal,
+  getStrategy,
+  signalWindow,
+} from "@/lib/strategies";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getTelegramCredentials } from "@/lib/telegram-settings";
 
@@ -39,22 +45,30 @@ const INTERVAL_MS: Record<KlineInterval, number> = {
   "1d": 86_400_000,
 };
 
-const ATR_PERIOD = 14;
-const STOP_MIN_PCT = 0.03;
-const STOP_MAX_PCT = 0.2;
-
-// Lock de sesión global del tick: si un barrido tarda más que el intervalo
-// del scheduler, el siguiente `curl` no arranca en paralelo. Un solo tick
+// Lock global del tick: si un barrido tarda más que el intervalo del
+// scheduler, el siguiente `curl` no arranca en paralelo. Un solo tick
 // procesa los bots a la vez; los demás salen sin hacer nada.
 const TICK_LOCK_KEY = 918_273_645;
 
 export async function runAllActiveBots(): Promise<TickOutcome[]> {
-  const [{ locked }] = (await db.execute(
-    sql`SELECT pg_try_advisory_lock(${TICK_LOCK_KEY}) AS locked`
-  )) as unknown as { locked: boolean }[];
-  if (!locked) return [];
+  // Lock de TRANSACCIÓN (no de sesión): con un pool de conexiones, el lock y
+  // el unlock de sesión pueden caer en conexiones distintas — el unlock falla
+  // en silencio y el lock queda tomado para siempre, matando todos los ticks
+  // siguientes (ni señales ni chequeo de stops). El de transacción vive y
+  // muere con la conexión de ESTA transacción, pase lo que pase.
+  return db.transaction(async (tx) => {
+    // El barrido incluye llamadas HTTP a Binance: la transacción queda idle
+    // mientras tanto. Si el Postgres del hosting trae
+    // idle_in_transaction_session_timeout, abortaría el tick a mitad de
+    // camino — lo desactivamos SOLO para esta transacción.
+    await tx.execute(
+      sql`SET LOCAL idle_in_transaction_session_timeout = 0`
+    );
+    const [{ locked }] = (await tx.execute(
+      sql`SELECT pg_try_advisory_xact_lock(${TICK_LOCK_KEY}) AS locked`
+    )) as unknown as { locked: boolean }[];
+    if (!locked) return [];
 
-  try {
     const bots = await db
       .select()
       .from(botConfigs)
@@ -74,9 +88,7 @@ export async function runAllActiveBots(): Promise<TickOutcome[]> {
       }
     }
     return outcomes;
-  } finally {
-    await db.execute(sql`SELECT pg_advisory_unlock(${TICK_LOCK_KEY})`);
-  }
+  });
 }
 
 async function updateBot(
@@ -141,6 +153,17 @@ const usd = new Intl.NumberFormat("es-AR", {
   maximumFractionDigits: 2,
 });
 
+// Alerta operativa por Telegram (si está configurado). Nunca rompe el tick.
+async function notifyAlert(bot: BotConfig, text: string) {
+  try {
+    const creds = await getTelegramCredentials(bot.userId);
+    if (!creds) return;
+    await sendTelegramMessage(creds.token, creds.chatId, text);
+  } catch {
+    // sin Telegram no pasa nada
+  }
+}
+
 // Aviso por Telegram (si el usuario lo configuró). Nunca rompe el trade.
 async function notifyTrade(
   bot: BotConfig,
@@ -203,7 +226,9 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
       ...defaultParams(strategy),
       ...(bot.params as Record<string, number>),
     };
-    const interval = bot.interval as KlineInterval;
+    // El intervalo sale de la ESTRATEGIA, no de la fila del bot: es el único
+    // backtesteado. Cubre también bots viejos creados cuando se podía elegir.
+    const interval: KlineInterval = strategy.intervalo;
     const warmup = strategy.warmup(params);
     const trailMult = params.trailingAtr ?? 0;
     const stopMult = params.stopAtr ?? 0;
@@ -258,14 +283,27 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
           await notifyTrade(bot, strategy.nombre, "SELL", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
           return out("sell", `stop ejecutado a ${order.avgPrice.toFixed(2)}`);
         }
+        // Stop activado pero posición polvo: avisar en vez de saltearlo en
+        // silencio tick tras tick (Telegram solo la primera vez).
+        const dustMsg =
+          "El stop se activó, pero la posición es demasiado chica para venderla (queda como polvo en tu cuenta).";
+        if (bot.lastError !== dustMsg) {
+          await notifyAlert(bot, `⚠️ ${bot.symbol}: ${dustMsg}`);
+        }
+        await updateBot(bot.id, { lastRunAt: now, lastError: dustMsg });
+        return out("skip", "stop activado con posición polvo");
       }
     }
 
-    // ---- 2) Velas cerradas del intervalo de la estrategia
+    // ---- 2) Velas cerradas del intervalo de la estrategia. Ventana
+    // canónica: las MISMAS velas con las que el backtest evalúa la señal
+    // (evalSignal) y el ATR de los stops (risk.ts); +1 por la vela en
+    // formación que se descarta.
+    const window = Math.max(signalWindow(strategy, params), ATR_WINDOW);
     const candles = await getKlines(
       bot.symbol,
       interval,
-      Math.min(1000, warmup + 60)
+      Math.min(1000, window + 1)
     );
     const closed = candles.slice(0, -1); // la última sigue abierta
     if (closed.length < warmup + 1) {
@@ -296,17 +334,16 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     let stopPrice = bot.stopPrice;
     let highestClose = bot.highestClose;
     if (bot.positionQty > 0 && trailMult > 0 && strategy.modo !== "dca") {
-      const atrNow = atr(closed, ATR_PERIOD)[i];
       highestClose = Math.max(highestClose ?? 0, price);
-      if (atrNow !== null && atrNow !== undefined) {
-        stopPrice = Math.max(
-          stopPrice ?? -Infinity,
-          highestClose - trailMult * atrNow
-        );
-      }
+      stopPrice = trailedStop(
+        stopPrice,
+        highestClose,
+        atrAt(closed, i),
+        trailMult
+      );
     }
 
-    const signal = strategy.signalAt(closed, i, params);
+    const signal = evalSignal(strategy, closed, i, params);
     const base = {
       lastRunAt: now,
       lastError: null as string | null,
@@ -315,36 +352,22 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
       highestClose,
     };
 
-    // Stop inicial por ATR al abrir posición (acotado entre 3% y 20%).
-    // Sin ATR disponible: fallback fijo del 8% — si el usuario pidió stop,
-    // SIEMPRE hay stop.
-    const initialStop = (fillPrice: number): number | null => {
-      if (stopMult <= 0) return null;
-      const atrNow = atr(closed, ATR_PERIOD)[i];
-      const distPct =
-        atrNow !== null && atrNow !== undefined
-          ? Math.min(
-              STOP_MAX_PCT,
-              Math.max(STOP_MIN_PCT, (stopMult * atrNow) / fillPrice)
-            )
-          : 0.08;
-      return fillPrice * (1 - distPct);
-    };
-
     // ---- 5a) DCA: compra periódica de monto fijo.
     if (strategy.modo === "dca") {
       if (buysBlocked) {
         await updateBot(bot.id, { ...base, lastSignal: buysBlockedReason });
         return out("hold", buysBlockedReason);
       }
-      const everyMs =
-        INTERVAL_MS[interval] * Math.max(1, Math.round(params.cadaNVelas));
-      const due =
-        !bot.lastBuyAt || now.getTime() - bot.lastBuyAt.getTime() >= everyMs;
-      const remaining = bot.budgetUsdt - bot.investedUsdt;
-      const chunk = Math.min(
-        params.montoPorCompra ?? Math.max(10, bot.budgetUsdt / 10),
-        remaining
+      const due = dcaDue(
+        bot.lastBuyAt,
+        now,
+        INTERVAL_MS[interval],
+        params.cadaNVelas
+      );
+      const chunk = dcaChunk(
+        params.montoPorCompra,
+        bot.budgetUsdt,
+        bot.investedUsdt
       );
 
       if (!due) {
@@ -424,7 +447,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
             : order.avgPrice,
         investedUsdt: bot.investedUsdt + order.cummulativeQuoteQty,
         lastBuyAt: now,
-        stopPrice: initialStop(order.avgPrice),
+        stopPrice: initialStop(order.avgPrice, atrAt(closed, i), stopMult),
         highestClose: order.avgPrice,
       });
       await notifyTrade(bot, strategy.nombre, "BUY", order.executedQty, order.avgPrice, order.cummulativeQuoteQty, reason);
@@ -442,11 +465,41 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
         });
         return out("skip", "posición mínima");
       }
-      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
-        symbol: bot.symbol,
-        side: "SELL",
-        quantity: qty,
-      });
+      let order;
+      try {
+        order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+          symbol: bot.symbol,
+          side: "SELL",
+          quantity: qty,
+        });
+      } catch (error) {
+        // Una señal de venta NUNCA se descarta: devolvemos la vela reclamada
+        // para que el próximo tick la reintente. (Una compra fallida puede
+        // esperar a la señal siguiente; una venta fallida dejaría la posición
+        // sin salida.) Telegram avisa solo en la primera falla, no por tick.
+        const message = error instanceof Error ? error.message : String(error);
+        if (!bot.lastError?.startsWith("La venta falló")) {
+          await notifyAlert(
+            bot,
+            `⚠️ ${bot.symbol}: la venta falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
+          );
+        }
+        await db
+          .update(botConfigs)
+          .set({
+            lastCandleTime: bot.lastCandleTime,
+            lastRunAt: now,
+            lastError: `La venta falló y se va a reintentar: ${message}`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(botConfigs.id, bot.id),
+              eq(botConfigs.lastCandleTime, lastCandle.openTime)
+            )
+          );
+        return out("error", `venta fallida, se reintenta: ${message}`);
+      }
       const reason = `Señal de venta (${strategy.nombre})`;
       await recordTrade(bot, "SELL", order.executedQty, order.avgPrice, order.netQuoteQty, order.orderId, reason);
       await updateBot(bot.id, {

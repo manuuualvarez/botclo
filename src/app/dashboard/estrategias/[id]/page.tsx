@@ -70,6 +70,7 @@ export default async function EstrategiaPage({
           strategyId={strategy.id}
           params={strategy.params}
           intervalo={strategy.intervalo}
+          modo={strategy.modo}
         />
       </div>
 

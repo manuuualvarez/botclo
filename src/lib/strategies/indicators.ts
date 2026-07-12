@@ -53,7 +53,7 @@ export function atr(
   period = 14
 ): (number | null)[] {
   const out: (number | null)[] = new Array(candles.length).fill(null);
-  if (candles.length <= period) return out;
+  if (candles.length < period) return out;
 
   const trueRanges: number[] = [candles[0].high - candles[0].low];
   for (let i = 1; i < candles.length; i++) {

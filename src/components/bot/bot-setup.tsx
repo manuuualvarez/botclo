@@ -38,11 +38,13 @@ interface StrategyOption {
   }[];
 }
 
-const INTERVALS = [
-  { value: "1h", label: "Cada hora (ideal para probar)" },
-  { value: "4h", label: "Cada 4 horas" },
-  { value: "1d", label: "Una vez por día (recomendado)" },
-];
+// El intervalo lo define la estrategia (es el único con el que fue
+// backtesteada); acá solo se muestra en lenguaje claro.
+const INTERVAL_LABELS: Record<string, string> = {
+  "1h": "Cada hora",
+  "4h": "Cada 4 horas",
+  "1d": "Una vez por día",
+};
 
 const BUDGET_PRESETS = [
   { label: "25%", fraction: 0.25 },
@@ -71,7 +73,7 @@ export function BotSetup({
   const strategy = strategies.find((s) => s.id === strategyId)!;
 
   const [symbol, setSymbol] = useState<string>("BTC");
-  const [interval, setInterval] = useState<string>(strategy.intervalo);
+  const interval = strategy.intervalo;
   const [budget, setBudget] = useState<string>("");
   const [chunk, setChunk] = useState<string>("50");
   const [paramValues, setParamValues] = useState<Record<string, string>>(
@@ -84,7 +86,6 @@ export function BotSetup({
   function selectStrategy(id: string) {
     const next = strategies.find((s) => s.id === id)!;
     setStrategyId(id);
-    setInterval(next.intervalo);
     setParamValues(
       Object.fromEntries(next.params.map((p) => [p.key, String(p.default)]))
     );
@@ -110,7 +111,6 @@ export function BotSetup({
       const result = await createBotAction({
         strategyId,
         symbol,
-        interval,
         budget,
         aceptaRiesgoReal: !isTestnet,
         params: {
@@ -204,18 +204,13 @@ export function BotSetup({
             </div>
             <div className="flex flex-col gap-2">
               <Label>Frecuencia de decisión</Label>
-              <Select value={interval} onValueChange={setInterval}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {INTERVALS.map((i) => (
-                    <SelectItem key={i.value} value={i.value}>
-                      {i.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex h-9 items-center rounded-md border border-input bg-transparent px-3 text-sm">
+                {INTERVAL_LABELS[interval] ?? interval}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                La define la estrategia: es la misma frecuencia con la que se
+                simula en el laboratorio.
+              </p>
             </div>
           </div>
         </CardContent>

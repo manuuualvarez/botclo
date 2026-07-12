@@ -3,16 +3,19 @@
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import {
-  getKlines,
+  getKlinesPaged,
   getTakerFeePct,
   BinanceApiError,
 } from "@/lib/binance/client";
 import { getDecryptedCredentials } from "@/lib/binance/credentials";
 import {
+  BACKTEST_PERIODS,
   BACKTEST_SYMBOLS,
+  CANDLES_PER_DAY,
   runBacktest,
   slippageFor,
   type BacktestResult,
+  type EquityPoint,
 } from "@/lib/backtest";
 import { sql } from "drizzle-orm";
 import { db } from "@/db";
@@ -45,11 +48,18 @@ async function checkBacktestQuota(userId: string): Promise<string | null> {
   return null;
 }
 
-const PERIODS = {
-  "6m": 182,
-  "1a": 365,
-  "2a": 730,
-} as const;
+// El gráfico no necesita más de ~1500 puntos: para períodos largos en velas
+// de 1 h serían decenas de miles — se diezma solo la curva (las métricas se
+// calculan siempre sobre la serie completa).
+function thinEquityCurve(curve: EquityPoint[], maxPoints = 1500): EquityPoint[] {
+  if (curve.length <= maxPoints) return curve;
+  const step = Math.ceil(curve.length / maxPoints);
+  const out = curve.filter((_, idx) => idx % step === 0);
+  if (out[out.length - 1] !== curve[curve.length - 1]) {
+    out.push(curve[curve.length - 1]);
+  }
+  return out;
+}
 
 const inputSchema = z.object({
   strategyId: z.string(),
@@ -116,13 +126,30 @@ export async function runBacktestAction(
     const raw = parsed.data.params[def.key] ?? def.default;
     params[def.key] = Math.min(def.max, Math.max(def.min, raw));
   }
+  // DCA: el monto por compra se clampea igual que al crear un robot
+  // (robot/actions.ts) — así el laboratorio simula el chunk real y no
+  // siempre el default de capital/10.
+  if (strategy.modo === "dca") {
+    const chunk = parsed.data.params.montoPorCompra;
+    params.montoPorCompra = Math.min(
+      parsed.data.capital,
+      Math.max(11, Number.isFinite(chunk) ? chunk : parsed.data.capital / 10)
+    );
+  }
 
   try {
-    const candles = await getKlines(
+    // El período se traduce a velas del intervalo REAL de la estrategia:
+    // "6 meses" de una estrategia de 1 h son ~4380 velas, no 182.
+    const days = BACKTEST_PERIODS.find(
+      (p) => p.value === parsed.data.period
+    )!.days;
+    const raw = await getKlinesPaged(
       `${parsed.data.symbol}USDT`,
       strategy.intervalo,
-      PERIODS[parsed.data.period]
+      days * CANDLES_PER_DAY[strategy.intervalo] + 1
     );
+    // La última vela viene en formación: se descarta, igual que el ejecutor.
+    const candles = raw.slice(0, -1);
     if (candles.length < strategy.warmup(params) + 10) {
       return {
         error:
@@ -136,7 +163,7 @@ export async function runBacktestAction(
       slippagePct: slippageFor(`${parsed.data.symbol}USDT`),
     });
     return {
-      result,
+      result: { ...result, equityCurve: thinEquityCurve(result.equityCurve) },
       symbol: parsed.data.symbol,
       feePct: userFee ?? 0.1,
       feePersonalizada: userFee !== null,
