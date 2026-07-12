@@ -280,3 +280,5 @@ docker compose up -d --build                   # deploy de una nueva versión
   tabla completa en INFRA.md.
 - **Retención de snapshots**: programar la limpieza cuando la tabla pase
   1 GB (INFRA.md).
+
+<!-- test: diagnóstico del workflow Claude Review -->
