@@ -1,4 +1,4 @@
-import { getKlines, type KlineInterval } from "@/lib/binance/client";
+import { getKlines } from "@/lib/binance/client";
 import {
   ema,
   highestHigh,
@@ -9,7 +9,9 @@ import {
   rsi,
   sma,
 } from "@/lib/strategies/indicators";
-import { defaultParams, getStrategy } from "@/lib/strategies";
+import { dcaEveryMs } from "@/lib/bot/decisions";
+import { INTERVAL_MS } from "@/lib/intervals";
+import { defaultParams, getStrategy, signalWindow } from "@/lib/strategies";
 import type { BotConfig } from "./executor";
 
 // "Qué está mirando el robot ahora": traduce el estado actual del indicador
@@ -31,10 +33,13 @@ export async function getBotInsight(bot: BotConfig): Promise<string | null> {
       ...defaultParams(strategy),
       ...(bot.params as Record<string, number>),
     };
+    // La MISMA ventana canónica con la que evalSignal decide (y el intervalo
+    // de la estrategia): los valores mostrados son exactamente los que el
+    // robot está mirando.
     const candles = await getKlines(
       bot.symbol,
-      bot.interval as KlineInterval,
-      Math.min(1000, strategy.warmup(params) + 60)
+      strategy.intervalo,
+      Math.min(1000, signalWindow(strategy, params) + 1)
     );
     const closed = candles.slice(0, -1);
     const i = closed.length - 1;
@@ -101,10 +106,10 @@ export async function getBotInsight(bot: BotConfig): Promise<string | null> {
         return `Tendencia de fondo: ${price > trend ? "ALCISTA (habilitado)" : "bajista — el robot espera afuera"} · RSI: ${num.format(value)} (compra cuando recupera ${params.rsiEntrada}).`;
       }
       case "dca": {
-        const everyMs =
-          { "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000 }[
-            bot.interval as KlineInterval
-          ] * Math.max(1, Math.round(params.cadaNVelas));
+        const everyMs = dcaEveryMs(
+          INTERVAL_MS[strategy.intervalo],
+          params.cadaNVelas
+        );
         const next = bot.lastBuyAt
           ? new Date(bot.lastBuyAt.getTime() + everyMs)
           : new Date();

@@ -83,7 +83,9 @@ function BotCard({ bot, insight }: { bot: BotConfig; insight: string | null }) {
               </Badge>
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Velas de {bot.interval} · {paramsResumen}
+              {/* El ejecutor opera con el intervalo de la ESTRATEGIA, no el
+                  de la fila (bots viejos podían elegirlo): mostrar el real. */}
+              Velas de {strategy?.intervalo ?? bot.interval} · {paramsResumen}
             </p>
           </div>
           <BotControls botId={bot.id} status={bot.status} />

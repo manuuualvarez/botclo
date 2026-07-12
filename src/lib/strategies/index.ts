@@ -6,7 +6,7 @@ import { bollingerRebote } from "./bollinger-rebote";
 import { donchianTechos } from "./donchian-techos";
 import { rocEnvion } from "./roc-envion";
 import { pullbackRecorte } from "./pullback-recorte";
-import type { RiskProfile, Strategy } from "./types";
+import type { Candle, RiskProfile, Signal, Strategy } from "./types";
 
 export const strategies: Strategy[] = [
   dca,
@@ -39,6 +39,39 @@ export function isRecommendedFor(
 
 export function defaultParams(strategy: Strategy): Record<string, number> {
   return Object.fromEntries(strategy.params.map((p) => [p.key, p.default]));
+}
+
+// Ventana canónica de evaluación de señales. Los indicadores recursivos
+// (EMA, RSI de Wilder) dependen del largo de la serie: evaluar la misma vela
+// con distinta cantidad de historia puede dar señales distintas. Para que el
+// backtest (toda la historia) y el ejecutor (una ventana descargada) decidan
+// EXACTAMENTE igual, ambos evalúan signalAt sobre estas últimas velas.
+export const SIGNAL_BUFFER = 60;
+
+export function signalWindow(
+  strategy: Strategy,
+  params: Record<string, number>
+): number {
+  return strategy.warmup(params) + SIGNAL_BUFFER;
+}
+
+// Única puerta de entrada a signalAt para el backtest y el ejecutor.
+export function evalSignal(
+  strategy: Strategy,
+  candles: Candle[],
+  i: number,
+  params: Record<string, number>
+): Signal {
+  if (strategy.modo === "dca") {
+    // La cadencia del DCA es de calendario, no de señal: pasarla por acá
+    // remaparía el índice a la ventana y rompería en silencio. Que falle
+    // fuerte.
+    throw new Error("evalSignal no aplica a estrategias DCA (modo calendario)");
+  }
+  const w = signalWindow(strategy, params);
+  const start = i + 1 - w;
+  if (start <= 0) return strategy.signalAt(candles, i, params);
+  return strategy.signalAt(candles.slice(start, i + 1), w - 1, params);
 }
 
 // Estrategias "de tendencia": si hay 3 o más robots activos con ellas sobre

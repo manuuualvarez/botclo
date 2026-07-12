@@ -9,16 +9,19 @@ import { botConfigs } from "@/db/schema";
 import { BACKTEST_SYMBOLS } from "@/lib/backtest";
 import { isTestnet } from "@/lib/binance/client";
 import { hasCredentials } from "@/lib/binance/credentials";
+import { clampDcaChunk } from "@/lib/bot/decisions";
 import { runBotTick } from "@/lib/bot/executor";
 import { recordAcceptance } from "@/lib/legal";
 import { getEntitlement } from "@/lib/plan";
 import { rateLimit, rateLimitMessage } from "@/lib/rate-limit";
 import { getStrategy } from "@/lib/strategies";
 
+// El intervalo NO se elige: el robot opera con el intervalo para el que la
+// estrategia fue diseñada y backtesteada — otro intervalo sería una
+// configuración en vivo que ninguna simulación respalda.
 const createSchema = z.object({
   strategyId: z.string(),
   symbol: z.enum(BACKTEST_SYMBOLS),
-  interval: z.enum(["1h", "4h", "1d"]),
   budget: z.coerce.number().min(25).max(1_000_000),
   aceptaRiesgoReal: z.boolean().optional(),
   params: z.record(z.string(), z.coerce.number()),
@@ -100,10 +103,9 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
     params[def.key] = Math.min(def.max, Math.max(def.min, raw));
   }
   if (strategy.modo === "dca") {
-    const chunk = parsed.data.params.montoPorCompra;
-    params.montoPorCompra = Math.min(
-      parsed.data.budget,
-      Math.max(11, Number.isFinite(chunk) ? chunk : parsed.data.budget / 10)
+    params.montoPorCompra = clampDcaChunk(
+      parsed.data.params.montoPorCompra,
+      parsed.data.budget
     );
   }
 
@@ -119,7 +121,7 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
     await recordAcceptance(userId, "robot_real", {
       strategyId: strategy.id,
       symbol: `${parsed.data.symbol}USDT`,
-      interval: parsed.data.interval,
+      interval: strategy.intervalo,
       budgetUsdt: parsed.data.budget,
       params,
     });
@@ -129,7 +131,7 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
     userId,
     strategyId: strategy.id,
     symbol: `${parsed.data.symbol}USDT`,
-    interval: parsed.data.interval,
+    interval: strategy.intervalo,
     budgetUsdt: parsed.data.budget,
     params,
     status: "active",

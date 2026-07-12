@@ -58,7 +58,10 @@ export const smaCross: Strategy = {
     }
 
     if (sPrev <= lPrev && sNow > lNow) return "buy";
-    if (sPrev >= lPrev && sNow < lNow) return "sell";
+    // Venta por NIVEL, no solo en la vela exacta del cruce: si el robot se
+    // perdió esa vela (caída, orden rechazada), la señal se repite en cada
+    // vela siguiente hasta que la posición salga.
+    if (sNow < lNow) return "sell";
     return "hold";
   },
 };

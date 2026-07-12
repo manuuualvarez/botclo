@@ -26,6 +26,7 @@ import {
   type RunBacktestState,
 } from "@/app/dashboard/estrategias/[id]/actions";
 import { BACKTEST_PERIODS, BACKTEST_SYMBOLS } from "@/lib/backtest";
+import { dcaChunk, MIN_DCA_CHUNK_USD } from "@/lib/bot/decisions";
 import { formatUsd, humanizeCandles } from "@/lib/format";
 import type { StrategyParam } from "@/lib/strategies/types";
 
@@ -33,6 +34,7 @@ interface Props {
   strategyId: string;
   params: StrategyParam[];
   intervalo: string;
+  modo: "allin" | "dca";
 }
 
 function Stat({
@@ -79,10 +81,11 @@ function VerdictStat({ label, pct }: { label: string; pct: number }) {
   );
 }
 
-export function BacktestLab({ strategyId, params, intervalo }: Props) {
+export function BacktestLab({ strategyId, params, intervalo, modo }: Props) {
   const [symbol, setSymbol] = useState<string>("BTC");
   const [period, setPeriod] = useState<string>("1a");
   const [capital, setCapital] = useState<string>("500");
+  const [chunk, setChunk] = useState<string>("");
   const [paramValues, setParamValues] = useState<Record<string, string>>(
     Object.fromEntries(params.map((p) => [p.key, String(p.default)]))
   );
@@ -96,7 +99,12 @@ export function BacktestLab({ strategyId, params, intervalo }: Props) {
         symbol,
         period,
         capital,
-        params: paramValues,
+        // El monto por compra del DCA se simula igual que lo usaría el robot
+        // (vacío = default del robot: capital/10).
+        params:
+          modo === "dca" && chunk.trim() !== ""
+            ? { ...paramValues, montoPorCompra: chunk }
+            : paramValues,
       });
       setState(result);
     });
@@ -162,6 +170,20 @@ export function BacktestLab({ strategyId, params, intervalo }: Props) {
                 onChange={(e) => setCapital(e.target.value)}
               />
             </div>
+
+            {modo === "dca" && (
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="montoPorCompra">Monto por compra (USD)</Label>
+                <Input
+                  id="montoPorCompra"
+                  type="number"
+                  min={MIN_DCA_CHUNK_USD}
+                  placeholder={`${Math.round(dcaChunk(undefined, Number(capital) || 0, 0))} (el robot usa capital ÷ 10)`}
+                  value={chunk}
+                  onChange={(e) => setChunk(e.target.value)}
+                />
+              </div>
+            )}
 
             {params.map((p) => (
               <div key={p.key} className="flex flex-col gap-2">

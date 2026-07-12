@@ -51,16 +51,41 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
   testnet (o real según `BINANCE_USE_TESTNET`).
 - `src/lib/strategies/` — 8 estrategias como funciones puras `signalAt(velas, i)`
   SIN mirar el futuro (hay test anti look-ahead). Registrar nuevas en index.ts.
-  Los params `stopAtr`/`trailingAtr` activan el overlay de riesgo.
+  Los params `stopAtr`/`trailingAtr` activan el overlay de riesgo. Las señales
+  se evalúan SIEMPRE vía `evalSignal` (ventana canónica warmup+60): así el
+  backtest y el ejecutor deciden con los mismos datos exactos (los indicadores
+  recursivos dependen del largo de la serie — hay test de paridad en CI). Las
+  señales de venta deben ser por NIVEL, no solo en la vela del cruce (si el
+  robot se pierde una vela, la señal tiene que repetirse).
+- `src/lib/risk.ts` — overlay de riesgo COMPARTIDO (stop inicial, clamps
+  3–20%, fallback 8%, trailing chandelier, ATR sobre ventana fija): única
+  implementación para backtest y ejecutor.
 - `src/lib/backtest.ts` — simulador honesto: comisión 0,1% + slippage por par,
   stops evaluados contra el LOW intra-vela y gaps de apertura (regla
-  pesimista), trailing chandelier calculado con datos hasta t−1, métricas con
-  profit factor/costos/aviso de muestra chica. Backtest y ejecutor comparten
-  la misma función de decisión — si divergen, es un bug.
+  pesimista), trailing chandelier calculado con datos hasta t−1, drawdown
+  contra el low intra-vela, SIN interés compuesto (el robot opera presupuesto
+  fijo), DCA con la política real del ejecutor (chunk fijo hasta agotar),
+  métricas con profit factor/costos/aviso de muestra chica. Backtest y
+  ejecutor comparten decisión (evalSignal), riesgo (risk.ts) y sizing — si
+  divergen, es un bug. Los períodos del laboratorio se traducen a velas del
+  intervalo REAL de la estrategia (getKlinesPaged pagina de a 1000).
 - `src/lib/bot/executor.ts` — multi-robot (hasta 5 por usuario, uno por par
   con presupuesto propio): cada tick chequea stops contra el precio actual,
   y al cierre de vela nueva evalúa la señal (idempotente vía
-  last_candle_time) y ejecuta a lo sumo una orden MARKET. Notifica cada
+  last_candle_time) y ejecuta a lo sumo una orden MARKET. El lock del tick es
+  de sesión sobre una conexión RESERVADA (`pg.reserve()`): lock y unlock en
+  la misma conexión garantizado, sin transacción abierta durante el barrido
+  (a través del pool el lock podía quedar tomado para siempre). Una VENTA
+  fallida devuelve la vela reclamada y se reintenta el próximo tick (jamás
+  se descarta); si Binance no encuentra el saldo (-2010, posición
+  desincronizada) o la posición es polvo invendible, se da por cerrada con
+  alerta — el robot nunca queda congelado. Una compra fallida espera a la
+  señal siguiente. Las pérdidas achican el presupuesto (investedAfterSell):
+  el robot jamás repone plata del wallet — misma regla que el backtest. El
+  intervalo del robot es el de la estrategia (único backtesteado) — no se
+  elige, y el ejecutor lo deriva de la estrategia aunque la fila diga otra
+  cosa. Decisiones puras testeables en `src/lib/bot/decisions.ts`; intervalos
+  (ms/velas/etiquetas) SOLO desde `src/lib/intervals.ts`. Notifica cada
   operación por Telegram si el usuario lo configuró (token cifrado en DB).
   `POST /api/bot/tick` (público en proxy, autentica CRON_SECRET); el servicio
   `bot` del compose lo dispara cada BOT_TICK_SECONDS.

@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import type { KlineInterval } from "@/lib/intervals";
 import type { Candle } from "../strategies/types";
 
 // Datos de cuenta (saldos, órdenes): testnet o producción según .env.
@@ -173,7 +174,7 @@ function toTicker(raw: RawTicker): Ticker {
   };
 }
 
-export type KlineInterval = "1h" | "4h" | "1d";
+export type { KlineInterval } from "@/lib/intervals";
 
 // Precio spot al instante (sin caché): lo usa el chequeo de stops del robot.
 export async function getSpotPrice(symbol: string): Promise<number | null> {
@@ -199,15 +200,18 @@ type RawKline = [
 ];
 
 // Velas históricas desde el endpoint público de datos (máx. 1000 por pedido).
+// `endTime` (opcional) devuelve las velas que TERMINAN hasta ese momento —
+// lo usa getKlinesPaged para paginar hacia atrás.
 export async function getKlines(
   symbol: string,
   interval: KlineInterval,
-  limit: number
+  limit: number,
+  endTime?: number
 ): Promise<Candle[]> {
   const url = `${MARKET_DATA_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${Math.min(
     limit,
     1000
-  )}`;
+  )}${endTime !== undefined ? `&endTime=${endTime}` : ""}`;
   // 60s de caché: las decisiones se toman sobre velas CERRADAS, así que la
   // única consecuencia es enterarse de una vela nueva hasta 1 min más tarde.
   const res = await fetch(url, { next: { revalidate: 60 } });
@@ -222,6 +226,35 @@ export async function getKlines(
     volume: Number(k[5]),
     closeTime: k[6],
   }));
+}
+
+// Historia larga (backtests): encadena pedidos de a 1000 hacia atrás hasta
+// juntar `total` velas o agotar la historia del par. Devuelve en orden
+// cronológico; la última vela puede venir en formación (el que consume
+// decide descartarla). `fetchPage` es inyectable para testear la paginación
+// sin red.
+export async function getKlinesPaged(
+  symbol: string,
+  interval: KlineInterval,
+  total: number,
+  fetchPage: (
+    symbol: string,
+    interval: KlineInterval,
+    limit: number,
+    endTime?: number
+  ) => Promise<Candle[]> = getKlines
+): Promise<Candle[]> {
+  const out: Candle[] = [];
+  let endTime: number | undefined;
+  while (out.length < total) {
+    const want = Math.min(1000, total - out.length);
+    const batch = await fetchPage(symbol, interval, want, endTime);
+    if (batch.length === 0) break;
+    out.unshift(...batch);
+    if (batch.length < want) break; // historia agotada
+    endTime = batch[0].openTime - 1;
+  }
+  return out;
 }
 
 // Filtros de trading de un símbolo (tamaño mínimo de orden, redondeo de

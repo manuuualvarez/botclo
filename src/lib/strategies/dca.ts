@@ -29,8 +29,10 @@ export const dca: Strategy = {
   warmup() {
     return 1;
   },
-  signalAt(_candles, i, params) {
-    const every = Math.max(1, Math.round(params.cadaNVelas));
-    return i % every === 0 ? "buy" : "hold";
+  // El DCA no emite señales: su cadencia es de CALENDARIO y vive en un solo
+  // lugar por lado (dcaDue en el ejecutor, el módulo `every` del backtest).
+  // Una tercera implementación acá solo podría driftar en silencio.
+  signalAt() {
+    return "hold";
   },
 };
