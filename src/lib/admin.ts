@@ -8,14 +8,20 @@ import { currentUser } from "@clerk/nextjs/server";
 // podría agregar el mail de un admin a su cuenta y escalar privilegios si no
 // filtramos por verificación + primario.
 export async function isAdmin(): Promise<boolean> {
+  // currentUser() va PRIMERO a propósito: es la API dinámica que le dice a
+  // Next que la ruta se renderiza por request. Si el allowlist se evalúa
+  // antes y ADMIN_EMAILS no existe en el entorno del BUILD (en CI no está),
+  // el short-circuit devuelve false sin tocar ninguna API dinámica y Next
+  // prerenderiza el notFound() del layout como 404 ESTÁTICO — /admin queda
+  // muerto en producción aunque el runtime tenga la variable bien puesta.
+  const user = await currentUser();
+  if (!user) return false;
+
   const allowed = (process.env.ADMIN_EMAILS ?? "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
   if (allowed.length === 0) return false;
-
-  const user = await currentUser();
-  if (!user) return false;
 
   const primary = user.emailAddresses.find(
     (e) => e.id === user.primaryEmailAddressId
