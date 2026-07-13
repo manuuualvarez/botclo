@@ -19,6 +19,9 @@ export const LEGAL_HOLDER = {
   cuit: "[COMPLETAR CUIT — de tu constancia de AFIP/ARCA]",
   domicilio: "Calle 467 N° 4500, City Bell, La Plata, Provincia de Buenos Aires",
   ciudad: "City Bell, Provincia de Buenos Aires",
-  emailSoporte: "soporte@botclo.com",
-  emailPrivacidad: "privacidad@botclo.com",
+  // OJO: las casillas @botclo.com todavía no existen — mientras tanto van al
+  // email personal de Manuel para que ningún reclamo legal rebote (por acá
+  // llegan arrepentimientos y pedidos de derechos ARCO).
+  emailSoporte: "alvarezmanuelignacio@gmail.com",
+  emailPrivacidad: "alvarezmanuelignacio@gmail.com",
 } as const;
