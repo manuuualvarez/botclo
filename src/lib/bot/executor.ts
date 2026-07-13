@@ -18,7 +18,7 @@ import {
   investedAfterSell,
 } from "@/lib/bot/decisions";
 import { INTERVAL_MS, type KlineInterval } from "@/lib/intervals";
-import { getEntitlement } from "@/lib/plan";
+import { getEntitlement, plansEnforced } from "@/lib/plan";
 import { atrAt, ATR_WINDOW, initialStop, trailedStop } from "@/lib/risk";
 import {
   defaultParams,
@@ -236,7 +236,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     // stops y ventas siguen activos: la protección jamás se corta por deuda.
     let buysBlocked = false;
     let buysBlockedReason = "";
-    if (!isTestnet()) {
+    if (plansEnforced()) {
       const ent = await getEntitlement(bot.userId);
       if (!ent.limits.modoReal) {
         buysBlocked = true;

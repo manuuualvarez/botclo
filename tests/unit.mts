@@ -14,7 +14,7 @@ import { clampDcaChunk, dcaChunk, dcaDue, investedAfterSell } from "@/lib/bot/de
 import { runBacktest } from "@/lib/backtest";
 import { commissionIn, getKlinesPaged } from "@/lib/binance/client";
 import { rateLimit } from "@/lib/rate-limit";
-import { resolvePlan } from "@/lib/plan";
+import { plansEnforced, resolvePlan } from "@/lib/plan";
 import { dunningStateFor } from "@/lib/billing";
 import { verifyWebhookSignature } from "@/lib/mp";
 import type { Candle, Strategy } from "@/lib/strategies/types";
@@ -305,6 +305,16 @@ for (const s of strategies) {
 const o = { limit: 2, windowMs: 60_000 };
 check("rate limit permite y bloquea", rateLimit("x", o).ok && rateLimit("x", o).ok && !rateLimit("x", o).ok);
 check("rate limit por clave", rateLimit("y", o).ok);
+
+// --- Candados de plan por entorno ---
+delete process.env.ENFORCE_PLANS_IN_TESTNET;
+check("práctica sin flag → sin candados de plan", !plansEnforced());
+process.env.ENFORCE_PLANS_IN_TESTNET = "true";
+check("práctica con flag → enforcement como en prod", plansEnforced());
+process.env.BINANCE_USE_TESTNET = "false";
+delete process.env.ENFORCE_PLANS_IN_TESTNET;
+check("producción → candados SIEMPRE, sin importar el flag", plansEnforced());
+process.env.BINANCE_USE_TESTNET = "true";
 
 // --- Resolución de plan ---
 const now = new Date("2026-07-10T12:00:00Z");
