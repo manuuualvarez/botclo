@@ -1,12 +1,22 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { grants, subscriptions } from "@/db/schema";
+import { isTestnet } from "@/lib/binance/client";
 import {
   PLAN_LIMITS,
   planRank,
   type PlanId,
   type PlanLimits,
 } from "@/config/plans";
+
+// ¿Aplican los candados de plan (modo real, estrategias, pausa suave)?
+// En producción SIEMPRE. En modo práctica (testnet) por diseño no aplican
+// (el plan free "Práctica" incluye robots de prueba) — salvo que se prenda
+// ENFORCE_PLANS_IN_TESTNET=true, que simula el enforcement de producción
+// en dev para poder probarlo sin dinero real.
+export function plansEnforced(): boolean {
+  return !isTestnet() || process.env.ENFORCE_PLANS_IN_TESTNET === "true";
+}
 
 // Resolución del plan efectivo de un usuario:
 //   max(suscripción con acceso, grant vigente), si no → free.

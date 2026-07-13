@@ -12,7 +12,7 @@ import { hasCredentials } from "@/lib/binance/credentials";
 import { clampDcaChunk } from "@/lib/bot/decisions";
 import { runBotTick } from "@/lib/bot/executor";
 import { recordAcceptance } from "@/lib/legal";
-import { getEntitlement } from "@/lib/plan";
+import { getEntitlement, plansEnforced } from "@/lib/plan";
 import { rateLimit, rateLimitMessage } from "@/lib/rate-limit";
 import { getStrategy } from "@/lib/strategies";
 
@@ -53,7 +53,7 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
   const ent = await getEntitlement(userId);
   const limits = ent.limits;
 
-  if (!isTestnet()) {
+  if (plansEnforced()) {
     if (!limits.modoReal) {
       return {
         error:
@@ -87,7 +87,7 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
   if (!strategy) return { error: "Estrategia desconocida." };
 
   if (
-    !isTestnet() &&
+    plansEnforced() &&
     limits.estrategiasRobot !== null &&
     !limits.estrategiasRobot.includes(strategy.id)
   ) {

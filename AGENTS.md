@@ -115,6 +115,11 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
    - Enforcement: robots (cantidad/estrategias/modo real) en robot/actions y
      páginas; cuota de backtests gratis en estrategias/[id]/actions; ejecutor
      con "pausa suave" (sin plan o moroso: NO compra, SÍ stops y ventas).
+     Los candados de plan aplican en modo real; en práctica (testnet) el free
+     incluye robots por diseño — para PROBAR el enforcement en dev, prender
+     ENFORCE_PLANS_IN_TESTNET=true (gate único: plansEnforced() en plan.ts).
+     OJO en dev: probar flujos de MP deja suscripciones activas en la DB
+     (p.ej. la anual vence +1 año) — cancelarlas para volver a ser "free".
    - MercadoPago: src/lib/mp.ts (preapproval mensual + preferencia anual,
      firma de webhooks; NO se crean "productos" en MP, todo por API),
      src/lib/billing.ts (pagos idempotentes por mp_payment_id + máquina de
