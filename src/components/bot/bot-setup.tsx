@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, Bot, FlaskConical, Loader2 } from "lucide-react";
+import { AlertCircle, Bot, FlaskConical, Loader2, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,6 +47,30 @@ const BUDGET_PRESETS = [
   { label: "Todo", fraction: 1 },
 ];
 
+// Vuelve a pedir el saldo (router.refresh re-corre el server component):
+// clave cuando el usuario acaba de convertir o depositar USDT en Binance.
+function RefreshBalanceButton({
+  isRefreshing,
+  onRefresh,
+}: {
+  isRefreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+      onClick={onRefresh}
+      disabled={isRefreshing}
+    >
+      <RefreshCw className={`size-3 ${isRefreshing ? "animate-spin" : ""}`} />
+      {isRefreshing ? "Actualizando…" : "Actualizar saldo"}
+    </Button>
+  );
+}
+
 export function BotSetup({
   strategies,
   initialStrategyId,
@@ -76,6 +100,10 @@ export function BotSetup({
   const [error, setError] = useState<string | null>(null);
   const [riskOpen, setRiskOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
+  // router.refresh() re-ejecuta el server component de la página, que baja
+  // el saldo de Binance sin caché — así el usuario que acaba de fondear la
+  // cuenta ve la plata sin recargar todo a mano.
+  const [isRefreshing, startRefresh] = useTransition();
 
   function selectStrategy(id: string) {
     const next = strategies.find((s) => s.id === id)!;
@@ -232,7 +260,7 @@ export function BotSetup({
                 value={budget}
                 onChange={(e) => setBudget(e.target.value)}
               />
-              {availableUsdt !== null && (
+              {availableUsdt !== null ? (
                 <>
                   {availableUsdt >= 25 ? (
                     <>
@@ -256,20 +284,32 @@ export function BotSetup({
                           </Button>
                         ))}
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        Tenés {formatUsd(availableUsdt)} disponibles en USDT.
-                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-xs text-muted-foreground">
+                          Tenés {formatUsd(availableUsdt)} disponibles en USDT.
+                        </p>
+                        <RefreshBalanceButton
+                          isRefreshing={isRefreshing}
+                          onRefresh={() => startRefresh(() => router.refresh())}
+                        />
+                      </div>
                     </>
                   ) : (
-                    <p className="rounded-xl border border-amber-400/30 bg-amber-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-amber-200">
-                      El robot opera únicamente con USDT, y en tu cuenta hay{" "}
-                      {formatUsd(availableUsdt)} libres — no alcanza para el
-                      presupuesto mínimo (25 USDT). Para fondearlo, convertí
-                      parte de otro activo a USDT en Binance (opción
-                      «Convertir» en su app) y volvé acá. El resto de tus
-                      activos no se toca: los robots solo gastan el USDT que
-                      les asignás.
-                    </p>
+                    <>
+                      <p className="rounded-xl border border-amber-400/30 bg-amber-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-amber-200">
+                        El robot opera únicamente con USDT, y en tu cuenta hay{" "}
+                        {formatUsd(availableUsdt)} libres — no alcanza para el
+                        presupuesto mínimo (25 USDT). Para fondearlo, convertí
+                        parte de otro activo a USDT en Binance (opción
+                        «Convertir» en su app) y volvé acá. El resto de tus
+                        activos no se toca: los robots solo gastan el USDT que
+                        les asignás.
+                      </p>
+                      <RefreshBalanceButton
+                        isRefreshing={isRefreshing}
+                        onRefresh={() => startRefresh(() => router.refresh())}
+                      />
+                    </>
                   )}
                   {Number(budget) > availableUsdt && (
                     <p className="text-xs text-amber-300">
@@ -279,6 +319,16 @@ export function BotSetup({
                     </p>
                   )}
                 </>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    No pudimos leer tu saldo de Binance recién.
+                  </p>
+                  <RefreshBalanceButton
+                    isRefreshing={isRefreshing}
+                    onRefresh={() => startRefresh(() => router.refresh())}
+                  />
+                </div>
               )}
             </div>
             {strategy.modo === "dca" && (
