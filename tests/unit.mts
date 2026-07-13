@@ -15,7 +15,7 @@ import { runBacktest } from "@/lib/backtest";
 import { commissionIn, getKlinesPaged } from "@/lib/binance/client";
 import { rateLimit } from "@/lib/rate-limit";
 import { plansEnforced, resolvePlan } from "@/lib/plan";
-import { dunningStateFor } from "@/lib/billing";
+import { dunningStateFor, esArrepentimiento } from "@/lib/billing";
 import { verifyWebhookSignature } from "@/lib/mp";
 import type { Candle, Strategy } from "@/lib/strategies/types";
 
@@ -330,6 +330,11 @@ const d = (days: number) => new Date(now.getTime() - days * 8.64e7);
 check("día 1 → pago_fallido", dunningStateFor(d(1), now) === "pago_fallido");
 check("día 10 → pausa_suave", dunningStateFor(d(10), now) === "pausa_suave");
 check("día 31 → cancelada", dunningStateFor(d(31), now) === "cancelada");
+
+// --- Ventana de arrepentimiento (art. 34 Ley 24.240: 10 días corridos) ---
+check("cancelar a los 3 días → arrepentimiento", esArrepentimiento(d(3), now));
+check("día 10 exacto sigue dentro de la ventana", esArrepentimiento(d(10), now));
+check("día 11 ya no es arrepentimiento", !esArrepentimiento(d(11), now));
 
 // --- Firma webhook MP ---
 const ts = "1720000000";

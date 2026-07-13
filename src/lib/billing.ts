@@ -14,6 +14,21 @@ import { getTelegramCredentials } from "@/lib/telegram-settings";
 
 type Sub = typeof subscriptions.$inferSelect;
 
+// ¿La cancelación cae dentro de la ventana de arrepentimiento? (art. 34
+// Ley 24.240 / Res. 424/2020: 10 días CORRIDOS desde la contratación, con
+// derecho a devolución total). Aplica a cada nueva contratación — las
+// renovaciones no resetean `createdAt`, así que no dan falsos positivos.
+export const ARREPENTIMIENTO_DIAS = 10;
+
+export function esArrepentimiento(
+  contratadaEl: Date,
+  canceladaEl: Date
+): boolean {
+  const dias =
+    (canceladaEl.getTime() - contratadaEl.getTime()) / 86_400_000;
+  return dias <= ARREPENTIMIENTO_DIAS;
+}
+
 // Estado que corresponde según los días desde el primer fallo de cobro.
 export function dunningStateFor(failedSince: Date, now: Date): string {
   const days = Math.floor(
