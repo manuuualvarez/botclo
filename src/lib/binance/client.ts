@@ -40,6 +40,13 @@ export class BinanceApiError extends Error {
         return "La clave secreta no coincide con la API Key. Volvé a copiar ambas desde Binance.";
       case -1021:
         return "El reloj del servidor quedó desincronizado con Binance. Probá de nuevo en unos segundos.";
+      case -2010:
+        // El caso típico en la práctica: la suscripción automática de
+        // Binance Earn barre los USDT de la billetera Spot y la orden
+        // MARKET falla por saldo insuficiente aunque la plata "esté".
+        return /insufficient balance/i.test(this.message)
+          ? "Binance no encontró saldo disponible en tu billetera Spot. Ojo: si tenés activada la suscripción automática de Binance Earn, tus USDT se mueven solos a Earn y el robot no puede usarlos. Entrá a Binance, rescatá los fondos de Earn a tu billetera Spot y desactivá la suscripción automática."
+          : `Binance rechazó la orden (${this.code}): ${this.message}`;
       default:
         return `Binance devolvió un error (${this.code}): ${this.message}`;
     }

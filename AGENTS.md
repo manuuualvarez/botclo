@@ -79,8 +79,11 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
   fallida devuelve la vela reclamada y se reintenta el próximo tick (jamás
   se descarta); si Binance no encuentra el saldo (-2010, posición
   desincronizada) o la posición es polvo invendible, se da por cerrada con
-  alerta — el robot nunca queda congelado. Una compra fallida espera a la
-  señal siguiente. Las pérdidas achican el presupuesto (investedAfterSell):
+  alerta — el robot nunca queda congelado. Una COMPRA fallida también
+  devuelve la vela y se reintenta cada tick con alerta única (caso real: el
+  auto-subscribe de Binance Earn barre los USDT de Spot y la compra da -2010;
+  antes la vela quedaba consumida y "Ejecutar ahora" no hacía nada).
+  Las pérdidas achican el presupuesto (investedAfterSell):
   el robot jamás repone plata del wallet — misma regla que el backtest. El
   intervalo del robot es el de la estrategia (único backtesteado) — no se
   elige, y el ejecutor lo deriva de la estrategia aunque la fila diga otra

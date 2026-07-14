@@ -49,10 +49,11 @@ export interface TickOutcome {
 // procesa los bots a la vez; los demás salen sin hacer nada.
 const TICK_LOCK_KEY = 918_273_645;
 
-// Prefijo del lastError de una venta en reintento. La dedup de alertas de
-// Telegram compara contra ESTA constante — no reescribir el texto en un solo
-// lado, o el usuario recibe una alerta por tick.
+// Prefijos del lastError de una orden en reintento. La dedup de alertas de
+// Telegram compara contra ESTAS constantes — no reescribir el texto en un
+// solo lado, o el usuario recibe una alerta por tick.
 const SELL_RETRY_PREFIX = "La venta falló y se va a reintentar";
+const BUY_RETRY_PREFIX = "La compra falló y se va a reintentar";
 
 export async function runAllActiveBots(): Promise<TickOutcome[]> {
   // Lock de sesión sobre una conexión RESERVADA: lock y unlock viven
@@ -158,6 +159,46 @@ const usd = new Intl.NumberFormat("es-AR", {
   currency: "USD",
   maximumFractionDigits: 2,
 });
+
+function errorText(error: unknown): string {
+  return error instanceof BinanceApiError
+    ? error.friendlyMessage
+    : error instanceof Error
+      ? error.message
+      : String(error);
+}
+
+// Falla de orden que NO se descarta: devuelve la vela reclamada para que el
+// próximo tick (o "Ejecutar ahora") reintente. El UPDATE es condicional a que
+// la vela siga siendo la nuestra, para no pisar a una ejecución concurrente
+// que ya avanzó. Telegram avisa solo en la primera falla, no por tick
+// (dedup por prefijo en lastError).
+async function retryNextTick(
+  bot: BotConfig,
+  claimedCandleTime: number,
+  now: Date,
+  prefix: string,
+  message: string,
+  alertText: string
+) {
+  if (!bot.lastError?.startsWith(prefix)) {
+    await notifyAlert(bot, alertText);
+  }
+  await db
+    .update(botConfigs)
+    .set({
+      lastCandleTime: bot.lastCandleTime,
+      lastRunAt: now,
+      lastError: `${prefix}: ${message}`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(botConfigs.id, bot.id),
+        eq(botConfigs.lastCandleTime, claimedCandleTime)
+      )
+    );
+}
 
 // Alerta operativa por Telegram (si está configurado). Nunca rompe el tick.
 async function notifyAlert(bot: BotConfig, text: string) {
@@ -414,11 +455,28 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
         return out("skip", "monto bajo el mínimo");
       }
 
-      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
-        symbol: bot.symbol,
-        side: "BUY",
-        quoteOrderQty: chunk,
-      });
+      let order;
+      try {
+        order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+          symbol: bot.symbol,
+          side: "BUY",
+          quoteOrderQty: chunk,
+        });
+      } catch (error) {
+        // Misma política que la compra por señal: la vela se devuelve y se
+        // reintenta el próximo tick (lastBuyAt no cambió, así que sigue
+        // "tocando comprar").
+        const message = errorText(error);
+        await retryNextTick(
+          bot,
+          lastCandle.openTime,
+          now,
+          BUY_RETRY_PREFIX,
+          message,
+          `⚠️ ${bot.symbol}: la compra falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
+        );
+        return out("error", `compra fallida, se reintenta: ${message}`);
+      }
       const reason = `Compra periódica (${strategy.nombre})`;
       await recordTrade(bot, "BUY", order.netBaseQty, order.avgPrice, order.cummulativeQuoteQty, order.orderId, reason);
       const totalQty = bot.positionQty + order.netBaseQty;
@@ -457,11 +515,30 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
         });
         return out("skip", "sin presupuesto");
       }
-      const order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
-        symbol: bot.symbol,
-        side: "BUY",
-        quoteOrderQty: spend,
-      });
+      let order;
+      try {
+        order = await placeMarketOrder(creds.apiKey, creds.apiSecret, {
+          symbol: bot.symbol,
+          side: "BUY",
+          quoteOrderQty: spend,
+        });
+      } catch (error) {
+        // Una compra fallida tampoco se descarta: se devuelve la vela y se
+        // reintenta cada tick mientras la señal siga vigente. El caso real
+        // que motivó esto: Binance Earn barrió los USDT de Spot y la compra
+        // falló — sin reintento, la vela quedaba consumida y "Ejecutar
+        // ahora" no hacía nada hasta la vela siguiente.
+        const message = errorText(error);
+        await retryNextTick(
+          bot,
+          lastCandle.openTime,
+          now,
+          BUY_RETRY_PREFIX,
+          message,
+          `⚠️ ${bot.symbol}: la compra falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
+        );
+        return out("error", `compra fallida, se reintenta: ${message}`);
+      }
       const reason = `Señal de compra (${strategy.nombre})`;
       await recordTrade(bot, "BUY", order.netBaseQty, order.avgPrice, order.cummulativeQuoteQty, order.orderId, reason);
       await updateBot(bot.id, {
@@ -518,36 +595,17 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
           return out("error", "venta imposible: posición desincronizada, cerrada");
         }
         // Cualquier otra falla: una señal de venta NUNCA se descarta —
-        // devolvemos la vela reclamada para que el próximo tick reintente.
-        // (Una compra fallida puede esperar a la señal siguiente; una venta
-        // fallida dejaría la posición sin salida.) Telegram avisa solo en la
-        // primera falla, no por tick.
-        const message =
-          error instanceof BinanceApiError
-            ? error.friendlyMessage
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        if (!bot.lastError?.startsWith(SELL_RETRY_PREFIX)) {
-          await notifyAlert(
-            bot,
-            `⚠️ ${bot.symbol}: la venta falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
-          );
-        }
-        await db
-          .update(botConfigs)
-          .set({
-            lastCandleTime: bot.lastCandleTime,
-            lastRunAt: now,
-            lastError: `${SELL_RETRY_PREFIX}: ${message}`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(botConfigs.id, bot.id),
-              eq(botConfigs.lastCandleTime, lastCandle.openTime)
-            )
-          );
+        // devolvemos la vela reclamada para que el próximo tick reintente
+        // (una venta fallida dejaría la posición sin salida).
+        const message = errorText(error);
+        await retryNextTick(
+          bot,
+          lastCandle.openTime,
+          now,
+          SELL_RETRY_PREFIX,
+          message,
+          `⚠️ ${bot.symbol}: la venta falló y el robot la va a reintentar en cada revisión. Motivo: ${message}`
+        );
         return out("error", `venta fallida, se reintenta: ${message}`);
       }
       const reason = `Señal de venta (${strategy.nombre})`;
@@ -578,7 +636,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     });
     return out("hold", `señal: ${signal}`);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorText(error);
     await updateBot(bot.id, { lastRunAt: now, lastError: message }).catch(
       () => {}
     );

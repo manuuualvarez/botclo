@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import {
   AlertCircle,
+  Info,
   Loader2,
   Pause,
   Play,
@@ -34,6 +35,7 @@ export function BotControls({
   status: string;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const active = status === "active";
@@ -48,8 +50,10 @@ export function BotControls({
           onClick={() =>
             startTransition(async () => {
               setError(null);
+              setInfo(null);
               const result = await runMyBotNowAction(botId);
               if (result.error) setError(result.error);
+              else if (result.message) setInfo(result.message);
             })
           }
         >
@@ -68,6 +72,7 @@ export function BotControls({
           onClick={() =>
             startTransition(async () => {
               setError(null);
+              setInfo(null);
               await setBotStatusAction(botId, active ? "paused" : "active");
             })
           }
@@ -126,6 +131,13 @@ export function BotControls({
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {info && (
+        <Alert>
+          <Info className="size-4" />
+          <AlertDescription>{info}</AlertDescription>
         </Alert>
       )}
     </div>
