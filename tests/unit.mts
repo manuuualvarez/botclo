@@ -12,7 +12,7 @@ import { strategies, defaultParams, evalSignal, getStrategy, signalWindow } from
 import { initialStop, trailedStop } from "@/lib/risk";
 import { clampDcaChunk, dcaChunk, dcaDue, investedAfterSell } from "@/lib/bot/decisions";
 import { runBacktest } from "@/lib/backtest";
-import { commissionIn, getKlinesPaged } from "@/lib/binance/client";
+import { BinanceApiError, commissionIn, getKlinesPaged } from "@/lib/binance/client";
 import { rateLimit } from "@/lib/rate-limit";
 import { plansEnforced, resolvePlan } from "@/lib/plan";
 import { dunningStateFor, esArrepentimiento } from "@/lib/billing";
@@ -103,6 +103,14 @@ check(
 const fills = [{ commission: "0.001", commissionAsset: "BTC" }, { commission: "1.25", commissionAsset: "USDT" }];
 check("comisión en BTC", Math.abs(commissionIn(fills, "BTC") - 0.001) < 1e-9);
 check("comisión BNB no afecta otros", commissionIn(fills, "ETH") === 0);
+
+// --- Errores de Binance en criollo ---
+// El -2010 por saldo insuficiente tiene que mencionar Binance Earn: el
+// auto-subscribe barre los USDT de Spot y es la causa típica en producción.
+const sinSaldo = new BinanceApiError(400, -2010, "Account has insufficient balance for requested action.");
+check("-2010 sin saldo menciona Earn", sinSaldo.friendlyMessage.includes("Earn"));
+const otroRechazo = new BinanceApiError(400, -2010, "Market is closed.");
+check("-2010 genérico no culpa a Earn", !otroRechazo.friendlyMessage.includes("Earn"));
 
 // --- Backtest + overlay de riesgo (velas sintéticas) ---
 const mkStrat = (signalAt: Strategy["signalAt"]): Strategy => ({

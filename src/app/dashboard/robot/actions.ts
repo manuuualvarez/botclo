@@ -30,6 +30,9 @@ const createSchema = z.object({
 export interface BotActionState {
   error?: string;
   ok?: boolean;
+  // Qué decidió el tick de "Ejecutar ahora": sin esto, un tick que decide
+  // no operar parece un botón que no hace nada.
+  message?: string;
 }
 
 export async function createBotAction(input: unknown): Promise<BotActionState> {
@@ -191,5 +194,17 @@ export async function runMyBotNowAction(
   const outcome = await runBotTick(bot);
   revalidatePath("/dashboard/robot");
   if (outcome.action === "error") return { error: outcome.detail };
-  return { ok: true };
+
+  const amigable: Record<string, string> = {
+    "sin vela nueva":
+      "El robot ya había revisado la última vela cerrada: va a decidir de nuevo cuando cierre la próxima vela.",
+    "vela ya procesada por otra ejecución":
+      "Otra revisión estaba corriendo al mismo tiempo y ya se ocupó de esta vela.",
+    "señal: hold":
+      "El robot revisó la última vela y la estrategia no dio señal de comprar ni de vender.",
+  };
+  return {
+    ok: true,
+    message: amigable[outcome.detail] ?? `Resultado: ${outcome.detail}.`,
+  };
 }
