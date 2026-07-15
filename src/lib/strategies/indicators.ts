@@ -1,6 +1,28 @@
 // Indicadores técnicos como arrays alineados con la serie de entrada:
 // resultado[i] corresponde a values[i]; null mientras no hay datos suficientes.
 
+// Ventana de gracia de las señales de COMPRA por cruce: el cruce vale por
+// esta cantidad de velas (incluida la del cruce), no solo en la vela exacta.
+// Si el robot se pierde esa vela (pausa, caída, orden rechazada), todavía se
+// sube mientras la condición siga vigente — el espejo de la regla "las ventas
+// son por NIVEL". Caso real: el cruce del MACD ocurrió con el robot pausado
+// y la entrada se perdía para siempre.
+export const BUY_GRACE_CANDLES = 3;
+
+// ¿El predicado de cruce se cumplió en alguna de las últimas `grace` velas
+// hasta i inclusive? Solo mira hacia atrás (sin look-ahead); cada estrategia
+// pasa su propio predicado y re-valida en i que la condición siga vigente.
+export function crossWithin(
+  i: number,
+  grace: number,
+  crossAt: (j: number) => boolean
+): boolean {
+  for (let j = i; j > i - grace && j >= 1; j--) {
+    if (crossAt(j)) return true;
+  }
+  return false;
+}
+
 export function sma(values: number[], period: number): (number | null)[] {
   const out: (number | null)[] = new Array(values.length).fill(null);
   let sum = 0;

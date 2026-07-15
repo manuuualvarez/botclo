@@ -63,6 +63,10 @@ export const botConfigs = pgTable(
     // Idempotencia: última vela (openTime) ya procesada — un reinicio del
     // proceso nunca debe disparar dos órdenes por la misma señal.
     lastCandleTime: doublePrecision("last_candle_time"),
+    // Última vela que MIRÓ el vigía de robots pausados (solo dedup de avisos;
+    // NO toca last_candle_time — si el usuario reanuda a tiempo, el robot
+    // todavía agarra la vela de la señal gracias a la ventana de gracia).
+    watchedCandleTime: doublePrecision("watched_candle_time"),
     lastSignal: text("last_signal"),
     lastError: text("last_error"),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
@@ -195,6 +199,10 @@ export const telegramSettings = pgTable("telegram_settings", {
   botTokenEncrypted: text("bot_token_encrypted").notNull(),
   chatId: text("chat_id").notNull(),
   enabled: boolean("enabled").notNull().default(true),
+  // Parte de cada revisión de vela (además de las operaciones): "el robot
+  // está vivo y esto es lo que vio". Puede ser un mensaje por hora según la
+  // estrategia — por eso es opt-in.
+  candleReports: boolean("candle_reports").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

@@ -1,4 +1,4 @@
-import { sma } from "./indicators";
+import { BUY_GRACE_CANDLES, crossWithin, sma } from "./indicators";
 import type { Strategy } from "./types";
 
 // Cruce de medias móviles: compra cuando la media corta cruza hacia arriba a
@@ -51,17 +51,23 @@ export const smaCross: Strategy = {
 
     const sNow = shortSma[i];
     const lNow = longSma[i];
-    const sPrev = shortSma[i - 1];
-    const lPrev = longSma[i - 1];
-    if (sNow === null || lNow === null || sPrev === null || lPrev === null) {
-      return "hold";
-    }
+    if (sNow === null || lNow === null) return "hold";
 
-    if (sPrev <= lPrev && sNow > lNow) return "buy";
     // Venta por NIVEL, no solo en la vela exacta del cruce: si el robot se
     // perdió esa vela (caída, orden rechazada), la señal se repite en cada
     // vela siguiente hasta que la posición salga.
     if (sNow < lNow) return "sell";
+
+    // Compra con ventana de gracia: el cruce alcista vale por unas velas
+    // mientras la media corta siga por encima de la larga.
+    const crossAt = (j: number) => {
+      const sp = shortSma[j - 1];
+      const lp = longSma[j - 1];
+      const sn = shortSma[j];
+      const ln = longSma[j];
+      return sp !== null && lp !== null && sn !== null && ln !== null && sp <= lp && sn > ln;
+    };
+    if (crossWithin(i, BUY_GRACE_CANDLES, crossAt)) return "buy";
     return "hold";
   },
 };

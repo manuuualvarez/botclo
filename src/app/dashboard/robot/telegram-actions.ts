@@ -9,6 +9,7 @@ import {
   deleteTelegramSettings,
   getTelegramCredentials,
   saveTelegramSettings,
+  setTelegramCandleReports,
   setTelegramEnabled,
 } from "@/lib/telegram-settings";
 import { isTestnet } from "@/lib/binance/client";
@@ -122,6 +123,15 @@ export async function setTelegramEnabledAction(
   const { userId } = await auth();
   if (!userId) return;
   await setTelegramEnabled(userId, enabled);
+  revalidatePath("/dashboard/robot");
+}
+
+export async function setTelegramCandleReportsAction(
+  candleReports: boolean
+): Promise<void> {
+  const { userId } = await auth();
+  if (!userId) return;
+  await setTelegramCandleReports(userId, candleReports);
   revalidatePath("/dashboard/robot");
 }
 

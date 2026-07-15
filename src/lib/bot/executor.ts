@@ -18,6 +18,7 @@ import {
   investedAfterSell,
 } from "@/lib/bot/decisions";
 import { INTERVAL_MS, type KlineInterval } from "@/lib/intervals";
+import { getBotInsight } from "@/lib/bot/insight";
 import { getEntitlement, plansEnforced } from "@/lib/plan";
 import { atrAt, ATR_WINDOW, initialStop, trailedStop } from "@/lib/risk";
 import {
@@ -79,6 +80,20 @@ export async function runAllActiveBots(): Promise<TickOutcome[]> {
       const outcomes: TickOutcome[] = [];
       for (const bot of bots) {
         outcomes.push(await runBotTick(bot));
+      }
+
+      // Vigía de robots pausados: no operan, pero el usuario tiene que
+      // enterarse si el mercado les está pidiendo algo. Nunca rompe el tick.
+      const paused = await db
+        .select()
+        .from(botConfigs)
+        .where(eq(botConfigs.status, "paused"));
+      for (const bot of paused) {
+        try {
+          await watchPausedBot(bot);
+        } catch {
+          // el vigía es best-effort
+        }
       }
 
       // Snapshot del valor de cartera por usuario (throttled a 1/hora adentro).
@@ -209,6 +224,89 @@ async function notifyAlert(bot: BotConfig, text: string) {
   } catch {
     // sin Telegram no pasa nada
   }
+}
+
+// Parte de vela por Telegram (opt-in): al cierre de cada vela de decisión el
+// usuario recibe qué vio y qué decidió el robot — la prueba de vida que falta
+// cuando el robot decide NO operar. Nunca rompe el tick.
+async function notifyCandleReport(
+  bot: BotConfig,
+  strategyName: string,
+  interval: string,
+  decision: string
+) {
+  try {
+    const creds = await getTelegramCredentials(bot.userId);
+    if (!creds?.candleReports) return;
+    const insight = await getBotInsight(bot);
+    await sendTelegramMessage(
+      creds.token,
+      creds.chatId,
+      [
+        `🕯️ <b>${bot.symbol}</b> · ${strategyName}`,
+        `Cerró una vela de ${interval} y el robot revisó el mercado: ${decision}.`,
+        ...(insight ? [`👀 ${insight}`] : []),
+      ].join("\n")
+    );
+  } catch {
+    // sin Telegram no pasa nada
+  }
+}
+
+// Vigía de robots pausados: en pausa el robot no compra, no vende y NO
+// protege la posición con el stop — pero el mercado sigue. Al cierre de cada
+// vela evalúa la señal en solo-lectura y avisa por Telegram si el robot
+// hubiera actuado; la decisión de reanudar es del usuario. No toca
+// last_candle_time: si el usuario reanuda dentro de la ventana de gracia,
+// el robot todavía agarra la entrada de verdad.
+async function watchPausedBot(bot: BotConfig): Promise<void> {
+  const strategy = getStrategy(bot.strategyId);
+  // El DCA pausado no pierde nada irrecuperable: la próxima compra llega sola.
+  if (!strategy || strategy.modo === "dca") return;
+
+  const params = {
+    ...defaultParams(strategy),
+    ...(bot.params as Record<string, number>),
+  };
+  const window = Math.max(signalWindow(strategy, params), ATR_WINDOW);
+  const candles = await getKlines(
+    bot.symbol,
+    strategy.intervalo,
+    Math.min(1000, window + 1)
+  );
+  const closed = candles.slice(0, -1);
+  const i = closed.length - 1;
+  if (closed.length < strategy.warmup(params) + 1) return;
+  const lastCandle = closed[i];
+  if (bot.watchedCandleTime === lastCandle.openTime) return;
+
+  const price = lastCandle.close;
+  const hasPosition = bot.positionQty * price >= 5;
+  const signal = evalSignal(strategy, closed, i, params);
+
+  let estado = "pausado: sin señal";
+  let aviso: string | null = null;
+  if (hasPosition && bot.stopPrice !== null && price <= bot.stopPrice) {
+    estado = "pausado: el precio perforó el stop";
+    aviso = `⏸️🚨 ${bot.symbol}: el robot está PAUSADO y el precio (${usd.format(price)}) perforó su stop de protección (${usd.format(bot.stopPrice)}). La posición NO está protegida mientras siga en pausa — reanudalo o vendé a mano.`;
+  } else if (signal === "sell" && hasPosition) {
+    estado = "pausado: hubiera vendido";
+    aviso = `⏸️ ${bot.symbol}: la estrategia dio señal de VENTA, pero el robot está pausado y no vendió. Reanudalo si querés que gestione la salida.`;
+  } else if (signal === "buy" && !hasPosition) {
+    estado = "pausado: hubiera comprado";
+    aviso = `⏸️ ${bot.symbol}: la estrategia dio señal de COMPRA, pero el robot está pausado y no compró. La señal sigue vigente por unas velas: reanudalo desde la app si querés que entre.`;
+  }
+
+  // Dedup: avisamos solo cuando el estado CAMBIA — una señal que dura varias
+  // velas genera UN aviso; si desaparece y vuelve a aparecer, avisa de nuevo.
+  if (aviso && bot.lastSignal !== estado) {
+    await notifyAlert(bot, aviso);
+  }
+  await updateBot(bot.id, {
+    watchedCandleTime: lastCandle.openTime,
+    lastRunAt: new Date(),
+    lastSignal: estado,
+  });
 }
 
 // Aviso de operación por Telegram: arma el mensaje y delega el envío.
@@ -424,6 +522,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     if (strategy.modo === "dca") {
       if (buysBlocked) {
         await updateBot(bot.id, { ...base, lastSignal: buysBlockedReason });
+        await notifyCandleReport(bot, strategy.nombre, interval, buysBlockedReason);
         return out("hold", buysBlockedReason);
       }
       const due = dcaDue(
@@ -440,10 +539,12 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
 
       if (!due) {
         await updateBot(bot.id, { ...base, lastSignal: "esperando la próxima compra" });
+        await notifyCandleReport(bot, strategy.nombre, interval, "todavía no toca la próxima compra periódica");
         return out("hold", "todavía no toca comprar");
       }
       if (chunk < 10) {
         await updateBot(bot.id, { ...base, lastSignal: "presupuesto agotado" });
+        await notifyCandleReport(bot, strategy.nombre, interval, "el presupuesto ya está totalmente invertido");
         return out("hold", "presupuesto agotado");
       }
       const filters = await getSymbolFilters(bot.symbol);
@@ -502,6 +603,7 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
 
     if (signal === "buy" && buysBlocked) {
       await updateBot(bot.id, { ...base, lastSignal: buysBlockedReason });
+      await notifyCandleReport(bot, strategy.nombre, interval, buysBlockedReason);
       return out("hold", buysBlockedReason);
     }
 
@@ -634,6 +736,19 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
             : "sin señal, esperando"
           : `señal ${signal} (sin acción)`,
     });
+    // El parte cuenta POR QUÉ no hubo acción — sin esto, "el robot revisó y
+    // no hizo nada" parece un robot roto.
+    const decision =
+      signal === "hold"
+        ? hasPosition
+          ? "decidió mantener la posición"
+          : "sin señal de compra ni de venta, sigue esperando"
+        : signal === "buy"
+          ? hasPosition
+            ? "la señal de compra sigue vigente y el robot ya está comprado"
+            : "hay señal de compra, pero el robot está en enfriamiento tras un stop reciente"
+          : "la estrategia marca venta, pero el robot no tiene posición abierta";
+    await notifyCandleReport(bot, strategy.nombre, interval, decision);
     return out("hold", `señal: ${signal}`);
   } catch (error) {
     const message = errorText(error);

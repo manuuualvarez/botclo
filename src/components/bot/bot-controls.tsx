@@ -6,6 +6,7 @@ import {
   Info,
   Loader2,
   Pause,
+  PauseCircle,
   Play,
   Trash2,
   Zap,
@@ -126,6 +127,17 @@ export function BotControls({
           </DialogContent>
         </Dialog>
       </div>
+
+      {!active && (
+        <Alert>
+          <PauseCircle className="size-4" />
+          <AlertDescription>
+            Robot en pausa: no compra, no vende y el stop de protección NO
+            actúa. Si aparece una señal te avisamos por Telegram, pero para
+            que opere tenés que reanudarlo.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">
