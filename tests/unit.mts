@@ -7,7 +7,7 @@ process.env.MP_WEBHOOK_SECRET = "secreto-test";
 
 import { createHmac } from "node:crypto";
 import { encrypt, decrypt } from "@/lib/crypto";
-import { sma, rsi, ema, atr, macd, roc, rollingStd, highestHigh } from "@/lib/strategies/indicators";
+import { BUY_GRACE_CANDLES, crossWithin, sma, rsi, ema, atr, macd, roc, rollingStd, highestHigh } from "@/lib/strategies/indicators";
 import { strategies, defaultParams, evalSignal, getStrategy, signalWindow } from "@/lib/strategies";
 import { initialStop, trailedStop } from "@/lib/risk";
 import { clampDcaChunk, dcaChunk, dcaDue, investedAfterSell } from "@/lib/bot/decisions";
@@ -285,6 +285,73 @@ for (const s of strategies) {
     "sma-cross: la venta persiste después del cruce",
     cruce > 0 && evalSignal(s, mountain, cruce + 1, ps) === "sell" && evalSignal(s, mountain, cruce + 2, ps) === "sell"
   );
+}
+
+// --- Ventana de gracia de COMPRA (espejo de "las ventas son por nivel"):
+// el cruce alcista vale BUY_GRACE_CANDLES velas, no solo la vela exacta —
+// si el robot estaba pausado o la orden falló, todavía puede subirse.
+check("crossWithin: incluye la vela del cruce", crossWithin(5, 1, (j) => j === 5));
+check("crossWithin: cubre la ventana hacia atrás", crossWithin(7, 3, (j) => j === 5) && !crossWithin(8, 3, (j) => j === 5));
+check("crossWithin: no mira el futuro", !crossWithin(4, 3, (j) => j === 5));
+check("crossWithin: jamás evalúa j < 1", !crossWithin(0, 3, () => true));
+
+// V de precios con caída ACELERADA: mientras cae, la línea MACD sigue
+// bajando y su señal queda estrictamente por encima; tras el giro hay UN
+// solo cruce alcista y ninguno más — la persistencia observada es SOLO la
+// gracia. (Una caída lineal o exponencial no sirve: el MACD converge con la
+// línea pegada a su señal — a veces un epsilon POR ENCIMA — y el cruce
+// nunca ocurre.)
+const vShape: Candle[] = Array.from({ length: 240 }, (_, i) => {
+  const p = i < 120 ? 300 - i - 0.002 * i * i : 151.2 + 1.5 * (i - 120);
+  return cndl(i, p * 0.999, p * 1.003, p * 0.997, p);
+});
+for (const { id, ps } of [
+  { id: "sma-cross", ps: defaultParams(getStrategy("sma-cross")!) },
+  // filtro de tendencia apagado: la V no llega a superar una EMA200 a tiempo
+  { id: "macd-ola", ps: { ...defaultParams(getStrategy("macd-ola")!), filtroEma: 0 } },
+]) {
+  const s = getStrategy(id)!;
+  let cruce = -1;
+  for (let i = s.warmup(ps) + 1; i < vShape.length; i++) {
+    if (evalSignal(s, vShape, i, ps) === "buy") { cruce = i; break; }
+  }
+  check(`${id}: hay cruce alcista en la V`, cruce > 0);
+  check(
+    `${id}: la compra dura la ventana de gracia`,
+    cruce > 0 &&
+      Array.from({ length: BUY_GRACE_CANDLES - 1 }, (_, k) => evalSignal(s, vShape, cruce + 1 + k, ps)).every((sig) => sig === "buy")
+  );
+  check(
+    `${id}: la gracia expira (no compra para siempre)`,
+    cruce > 0 && evalSignal(s, vShape, cruce + BUY_GRACE_CANDLES, ps) === "hold" && evalSignal(s, vShape, cruce + BUY_GRACE_CANDLES + 1, ps) === "hold"
+  );
+}
+
+// Las estrategias de cruce siguen emitiendo COMPRAS (una gracia mal cableada
+// podría apagar las entradas sin romper nada más). pullback-recorte necesita
+// su escenario propio: suba larga sobre la EMA200, recorte de 10 velas y
+// recuperación suave que cruza el RSI de entrada.
+for (const id of ["bollinger-rebote", "sma-cross"]) {
+  const s = getStrategy(id)!;
+  const ps = defaultParams(s);
+  let compra = false;
+  for (let i = s.warmup(ps) + 1; i < synth.length && !compra; i++) {
+    if (evalSignal(s, synth, i, ps) === "buy") compra = true;
+  }
+  check(`emite señal de compra: ${id}`, compra);
+}
+{
+  const dipRise: Candle[] = Array.from({ length: 320 }, (_, i) => {
+    const p = i < 250 ? 100 + 0.5 * i : i < 260 ? 225 - 3 * (i - 249) : 195 + 0.8 * (i - 259);
+    return cndl(i, p, p + 1, p - 1, p);
+  });
+  const s = getStrategy("pullback-recorte")!;
+  const ps = defaultParams(s);
+  let compra = false;
+  for (let i = s.warmup(ps) + 1; i < dipRise.length && !compra; i++) {
+    if (evalSignal(s, dipRise, i, ps) === "buy") compra = true;
+  }
+  check("emite señal de compra: pullback-recorte", compra);
 }
 
 // --- Parámetros degenerados (post-clamp) no rompen ni operan de más ---

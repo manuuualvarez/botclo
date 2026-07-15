@@ -1,4 +1,4 @@
-import { ema, macd } from "./indicators";
+import { BUY_GRACE_CANDLES, crossWithin, ema, macd } from "./indicators";
 import type { Strategy } from "./types";
 
 // "Ola MACD": seguimiento de tendencia. Compra en el cruce alcista del MACD
@@ -42,15 +42,20 @@ export const macdOla: Strategy = {
     const { line, signal } = macd(closes, fast, slow, sig);
     const now = line[i];
     const sNow = signal[i];
-    const prev = line[i - 1];
-    const sPrev = signal[i - 1];
-    if (now === null || sNow === null || prev === null || sPrev === null) {
-      return "hold";
-    }
+    if (now === null || sNow === null) return "hold";
 
     if (now < sNow) return "sell";
 
-    if (prev <= sPrev && now > sNow) {
+    // Compra con ventana de gracia: el cruce alcista vale por unas velas
+    // mientras el MACD siga arriba de su señal y el filtro pase HOY.
+    const crossAt = (j: number) => {
+      const p = line[j - 1];
+      const sp = signal[j - 1];
+      const n = line[j];
+      const sn = signal[j];
+      return p !== null && sp !== null && n !== null && sn !== null && p <= sp && n > sn;
+    };
+    if (crossWithin(i, BUY_GRACE_CANDLES, crossAt)) {
       if (filter > 0) {
         const trend = ema(closes, filter)[i];
         if (trend === null || closes[i] <= trend) return "hold";

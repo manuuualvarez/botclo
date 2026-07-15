@@ -21,11 +21,16 @@ import {
   detectChatIdAction,
   saveTelegramAction,
   sendTestTelegramAction,
+  setTelegramCandleReportsAction,
   setTelegramEnabledAction,
 } from "@/app/dashboard/robot/telegram-actions";
 
 interface Props {
-  configured: { chatId: string; enabled: boolean } | null;
+  configured: {
+    chatId: string;
+    enabled: boolean;
+    candleReports: boolean;
+  } | null;
 }
 
 const guideSteps = [
@@ -118,6 +123,26 @@ export function TelegramSetup({ configured }: Props) {
                 Quitar
               </Button>
             </div>
+          </div>
+          <div className="mt-4 flex items-start justify-between gap-4 rounded-lg border border-white/5 bg-white/[0.02] p-3">
+            <div>
+              <Label htmlFor="tg-candle-reports" className="text-sm">
+                Parte de cada revisión
+              </Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Además de las compras y ventas, te contamos qué vio y qué
+                decidió el robot cada vez que cierra una vela — la prueba de
+                que está vivo aunque no opere. Según la estrategia puede ser
+                un mensaje por hora.
+              </p>
+            </div>
+            <Switch
+              id="tg-candle-reports"
+              checked={configured.candleReports}
+              onCheckedChange={(v) =>
+                startTransition(() => setTelegramCandleReportsAction(v))
+              }
+            />
           </div>
           {error && (
             <Alert variant="destructive" className="mt-4">

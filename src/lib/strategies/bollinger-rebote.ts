@@ -1,4 +1,4 @@
-import { rollingStd, sma } from "./indicators";
+import { BUY_GRACE_CANDLES, crossWithin, rollingStd, sma } from "./indicators";
 import type { Strategy } from "./types";
 
 // "Rebote Bollinger": reversión a la media. Compra cuando el precio perforó
@@ -36,18 +36,28 @@ export const bollingerRebote: Strategy = {
     const mid = sma(closes, period);
     const std = rollingStd(closes, period);
     const midNow = mid[i];
-    const midPrev = mid[i - 1];
     const stdNow = std[i];
-    const stdPrev = std[i - 1];
-    if (midNow === null || midPrev === null || stdNow === null || stdPrev === null) {
-      return "hold";
-    }
+    if (midNow === null || stdNow === null) return "hold";
 
     const lowerNow = midNow - k * stdNow;
-    const lowerPrev = midPrev - k * stdPrev;
 
     if (closes[i] >= midNow) return "sell";
-    if (closes[i - 1] < lowerPrev && closes[i] > lowerNow) return "buy";
+
+    // Compra con ventana de gracia: el reingreso a la banda vale por unas
+    // velas, mientras el rebote siga en pie — precio arriba de la banda
+    // inferior (si volvió a perforarla, habrá un reingreso nuevo) y todavía
+    // debajo de la media (garantizado por el sell de arriba).
+    const crossAt = (j: number) => {
+      const mj = mid[j];
+      const sj = std[j];
+      const mp = mid[j - 1];
+      const sp = std[j - 1];
+      if (mj === null || sj === null || mp === null || sp === null) return false;
+      return closes[j - 1] < mp - k * sp && closes[j] > mj - k * sj;
+    };
+    if (closes[i] > lowerNow && crossWithin(i, BUY_GRACE_CANDLES, crossAt)) {
+      return "buy";
+    }
     return "hold";
   },
 };

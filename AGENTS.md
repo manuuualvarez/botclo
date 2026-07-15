@@ -56,7 +56,13 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
   backtest y el ejecutor deciden con los mismos datos exactos (los indicadores
   recursivos dependen del largo de la serie — hay test de paridad en CI). Las
   señales de venta deben ser por NIVEL, no solo en la vela del cruce (si el
-  robot se pierde una vela, la señal tiene que repetirse).
+  robot se pierde una vela, la señal tiene que repetirse). Las COMPRAS por
+  cruce tienen ventana de gracia (BUY_GRACE_CANDLES en indicators.ts, helper
+  crossWithin): el cruce vale unas velas mientras la condición siga vigente —
+  un robot pausado o una orden fallida ya no pierden la entrada para siempre
+  (caso real: cruce del MACD con el robot pausado). Cambia también el
+  backtest (re-entradas post-stop dentro de la gracia): es a propósito,
+  backtest y ejecutor deciden igual.
 - `src/lib/risk.ts` — overlay de riesgo COMPARTIDO (stop inicial, clamps
   3–20%, fallback 8%, trailing chandelier, ATR sobre ventana fija): única
   implementación para backtest y ejecutor.
@@ -89,7 +95,13 @@ toda la UI en español rioplatense (voseo), con flujos paso a paso.
   elige, y el ejecutor lo deriva de la estrategia aunque la fila diga otra
   cosa. Decisiones puras testeables en `src/lib/bot/decisions.ts`; intervalos
   (ms/velas/etiquetas) SOLO desde `src/lib/intervals.ts`. Notifica cada
-  operación por Telegram si el usuario lo configuró (token cifrado en DB).
+  operación por Telegram si el usuario lo configuró (token cifrado en DB);
+  con `candle_reports` activo manda además un parte al cierre de cada vela
+  de decisión ("qué vio y qué decidió") — la prueba de vida cuando el robot
+  no opera. Los robots PAUSADOS tienen vigía: cada vela nueva se evalúa en
+  solo-lectura (dedup por watched_candle_time, sin tocar last_candle_time) y
+  avisa por Telegram si el robot hubiera comprado/vendido o si el precio
+  perforó el stop de una posición sin protección.
   `POST /api/bot/tick` (público en proxy, autentica CRON_SECRET); el servicio
   `bot` del compose lo dispara cada BOT_TICK_SECONDS.
 - `src/lib/bot/insight.ts` — "qué está mirando el robot" en lenguaje claro.

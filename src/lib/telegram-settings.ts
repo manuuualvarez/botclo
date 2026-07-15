@@ -6,6 +6,7 @@ import { decrypt, encrypt } from "@/lib/crypto";
 export interface TelegramStatus {
   chatId: string;
   enabled: boolean;
+  candleReports: boolean;
 }
 
 export async function getTelegramStatus(
@@ -13,7 +14,7 @@ export async function getTelegramStatus(
 ): Promise<TelegramStatus | null> {
   const row = await db.query.telegramSettings.findFirst({
     where: eq(telegramSettings.userId, userId),
-    columns: { chatId: true, enabled: true },
+    columns: { chatId: true, enabled: true, candleReports: true },
   });
   return row ?? null;
 }
@@ -21,12 +22,16 @@ export async function getTelegramStatus(
 // Token descifrado + chat, solo para uso interno del servidor (enviar avisos).
 export async function getTelegramCredentials(
   userId: string
-): Promise<{ token: string; chatId: string } | null> {
+): Promise<{ token: string; chatId: string; candleReports: boolean } | null> {
   const row = await db.query.telegramSettings.findFirst({
     where: eq(telegramSettings.userId, userId),
   });
   if (!row || !row.enabled) return null;
-  return { token: decrypt(row.botTokenEncrypted), chatId: row.chatId };
+  return {
+    token: decrypt(row.botTokenEncrypted),
+    chatId: row.chatId,
+    candleReports: row.candleReports,
+  };
 }
 
 export async function saveTelegramSettings(
@@ -54,6 +59,16 @@ export async function setTelegramEnabled(
   await db
     .update(telegramSettings)
     .set({ enabled, updatedAt: new Date() })
+    .where(eq(telegramSettings.userId, userId));
+}
+
+export async function setTelegramCandleReports(
+  userId: string,
+  candleReports: boolean
+): Promise<void> {
+  await db
+    .update(telegramSettings)
+    .set({ candleReports, updatedAt: new Date() })
     .where(eq(telegramSettings.userId, userId));
 }
 

@@ -1,4 +1,4 @@
-import { ema, rsi } from "./indicators";
+import { BUY_GRACE_CANDLES, crossWithin, ema, rsi } from "./indicators";
 import type { Strategy } from "./types";
 
 // "Comprá el Recorte": pullback dentro de tendencia alcista. Solo opera si el
@@ -38,15 +38,23 @@ export const pullbackRecorte: Strategy = {
     const trend = ema(closes, trendPeriod)[i];
     const values = rsi(closes, rsiPeriod);
     const now = values[i];
-    const prev = values[i - 1];
-    if (trend === null || now === null || prev === null) return "hold";
+    if (trend === null || now === null) return "hold";
 
     // Tendencia dada vuelta o RSI recalentado: afuera.
     if (closes[i] < trend) return "sell";
     if (now > params.rsiSalida) return "sell";
 
-    // Recorte que se recupera, con la tendencia a favor: adentro.
-    if (prev < params.rsiEntrada && now >= params.rsiEntrada) return "buy";
+    // Recorte que se recupera, con la tendencia a favor: adentro. El cruce
+    // del RSI vale por una ventana de gracia mientras siga recuperado (si
+    // volvió a caer bajo el umbral, habrá un cruce nuevo).
+    const crossAt = (j: number) => {
+      const p = values[j - 1];
+      const n = values[j];
+      return p !== null && n !== null && p < params.rsiEntrada && n >= params.rsiEntrada;
+    };
+    if (now >= params.rsiEntrada && crossWithin(i, BUY_GRACE_CANDLES, crossAt)) {
+      return "buy";
+    }
     return "hold";
   },
 };
