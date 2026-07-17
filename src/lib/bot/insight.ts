@@ -34,6 +34,10 @@ const usd = new Intl.NumberFormat("es-AR", {
 
 const num = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 1 });
 
+// Valores del MACD: son diferencias de precio (minúsculas en pares baratos) —
+// cifras significativas para que nunca se muestren como "0".
+const val = new Intl.NumberFormat("es-AR", { maximumSignificantDigits: 4 });
+
 export async function getBotInsight(bot: BotConfig): Promise<string | null> {
   try {
     const strategy = getStrategy(bot.strategyId);
@@ -115,17 +119,23 @@ export async function getBotInsight(bot: BotConfig): Promise<string | null> {
         const filtro = Math.round(params.filtroEma);
         const trend = filtro > 0 ? ema(closes, filtro)[i] : null;
         const filtroOk = filtro <= 0 || (trend !== null && price > trend);
+        // Los números exactos que el robot comparó: sin esto, "espera el
+        // cruce" no dice ni qué precio evaluó ni cuánto le falta al envión.
+        const numeros = `Precio evaluado: ${usd.format(price)} · envión (MACD): ${val.format(l)} / señal a cruzar: ${val.format(s)}${
+          filtro > 0 && trend !== null ? ` · EMA${filtro}: ${usd.format(trend)}` : ""
+        }.`;
         if (l < s) {
-          texto = `El envión (MACD) está negativo — el robot espera el próximo cruce alcista${filtro > 0 ? ` con el precio sobre la EMA${filtro}` : ""}.`;
+          texto = hasPosition
+            ? `${numeros} El envión cruzó por debajo de su señal.`
+            : `${numeros} El envión está por debajo de su señal — el robot compra recién cuando la cruce para arriba${filtro > 0 ? ` con el precio sobre la EMA${filtro}` : ""}.`;
         } else if (hasPosition) {
-          texto =
-            "El envión (MACD) sigue positivo: el robot mantiene la posición y vende cuando el envión cruce para abajo.";
+          texto = `${numeros} El envión sigue arriba de su señal: el robot mantiene la posición y vende cuando cruce para abajo.`;
         } else if (signal === "buy") {
-          texto = "El MACD acaba de cruzar para arriba con el mercado a favor.";
+          texto = `${numeros} El envión acaba de cruzar para arriba con el mercado a favor.`;
         } else if (!filtroOk) {
-          texto = `El envión (MACD) es positivo, pero el precio está debajo de la EMA${filtro}: las compras quedan bloqueadas hasta que el mercado vuelva a ser alcista.`;
+          texto = `${numeros} El envión es positivo, pero el precio está debajo de la EMA${filtro}: las compras quedan bloqueadas hasta que el mercado vuelva a ser alcista.`;
         } else {
-          texto = `El envión (MACD) es positivo, pero el cruce alcista ya pasó hace más de ${BUY_GRACE_CANDLES} velas sin que el robot pudiera comprarlo: ahora espera que el envión afloje y vuelva a cruzar para arriba.`;
+          texto = `${numeros} El envión es positivo, pero el cruce alcista ya pasó hace más de ${BUY_GRACE_CANDLES} velas sin que el robot pudiera comprarlo: ahora espera que afloje y vuelva a cruzar para arriba.`;
         }
         break;
       }

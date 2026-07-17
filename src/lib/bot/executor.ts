@@ -3,9 +3,11 @@ import { db, pg } from "@/db";
 import { botConfigs, botTrades } from "@/db/schema";
 import {
   BinanceApiError,
+  CONNECTION_ERROR_MESSAGE,
   getKlines,
   getSpotPrice,
   getSymbolFilters,
+  isConnectionError,
   isTestnet,
   placeMarketOrder,
   roundToStep,
@@ -176,11 +178,9 @@ const usd = new Intl.NumberFormat("es-AR", {
 });
 
 function errorText(error: unknown): string {
-  return error instanceof BinanceApiError
-    ? error.friendlyMessage
-    : error instanceof Error
-      ? error.message
-      : String(error);
+  if (error instanceof BinanceApiError) return error.friendlyMessage;
+  if (isConnectionError(error)) return CONNECTION_ERROR_MESSAGE;
+  return error instanceof Error ? error.message : String(error);
 }
 
 // Falla de orden que NO se descarta: devuelve la vela reclamada para que el
@@ -486,7 +486,17 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     // Si otra ejecución ya la tomó (o no hay vela nueva), abortamos acá —
     // así una orden MARKET nunca se dispara dos veces por la misma señal.
     if (bot.lastCandleTime === lastCandle.openTime) {
-      await updateBot(bot.id, { lastRunAt: now });
+      // Si el tick llegó hasta acá, la conexión con Binance ya volvió: un
+      // corte de red viejo no puede quedar clavado en pantalla hasta la
+      // próxima vela (en velas de 1d serían 24 h de alerta fantasma).
+      // "fetch failed" es el texto crudo que guardaban versiones anteriores.
+      const staleConnError =
+        bot.lastError === CONNECTION_ERROR_MESSAGE ||
+        bot.lastError === "fetch failed";
+      await updateBot(bot.id, {
+        lastRunAt: now,
+        ...(staleConnError ? { lastError: null } : {}),
+      });
       return out("hold", "sin vela nueva");
     }
     if (!(await claimCandle(bot.id, lastCandle.openTime))) {
