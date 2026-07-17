@@ -53,6 +53,22 @@ export class BinanceApiError extends Error {
   }
 }
 
+// Falla de RED (el "fetch failed" crudo de Node): DNS caído, socket cortado,
+// timeout. Binance nunca llegó a responder — no es un rechazo de la API, y al
+// usuario no le pide ninguna acción: la próxima revisión reintenta sola.
+export const CONNECTION_ERROR_MESSAGE =
+  "No hubo conexión con Binance en la última revisión (corte momentáneo de internet o del servidor). No tenés que hacer nada: el robot reintenta solo en la próxima revisión.";
+
+export function isConnectionError(error: unknown): boolean {
+  if (error instanceof BinanceApiError || !(error instanceof Error)) {
+    return false;
+  }
+  const cause = error.cause instanceof Error ? error.cause.message : "";
+  return /fetch failed|terminated|socket|network|ECONN|ETIMEDOUT|EAI_AGAIN|abort/i.test(
+    `${error.message} ${cause}`
+  );
+}
+
 async function parseError(res: Response): Promise<never> {
   const body = (await res.json().catch(() => null)) as {
     code?: number;

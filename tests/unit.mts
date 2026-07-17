@@ -12,7 +12,7 @@ import { strategies, defaultParams, evalSignal, getStrategy, signalWindow } from
 import { initialStop, trailedStop } from "@/lib/risk";
 import { clampDcaChunk, dcaChunk, dcaDue, investedAfterSell } from "@/lib/bot/decisions";
 import { runBacktest } from "@/lib/backtest";
-import { BinanceApiError, commissionIn, getKlinesPaged } from "@/lib/binance/client";
+import { BinanceApiError, commissionIn, getKlinesPaged, isConnectionError } from "@/lib/binance/client";
 import { rateLimit } from "@/lib/rate-limit";
 import { plansEnforced, resolvePlan } from "@/lib/plan";
 import { dunningStateFor, esArrepentimiento } from "@/lib/billing";
@@ -216,6 +216,13 @@ check("paginado contiguo sin huecos ni duplicados", paged.every((c, i) => c.open
 const pagedCorto = await getKlinesPaged("BTCUSDT", "1d", 300, fakeFetch);
 check("pedido chico = una página con las velas más nuevas", pagedCorto.length === 300 && pagedCorto[0].openTime === pool[2200].openTime && pagedCorto[299].openTime === pool[2499].openTime);
 check("historia agotada devuelve lo que hay", (await getKlinesPaged("BTCUSDT", "1d", 5000, fakeFetch)).length === 2500);
+
+// --- Errores de conexión: el "fetch failed" crudo de undici se distingue de
+// un rechazo real de la API (para traducirlo y auto-limpiarlo en el robot).
+check("fetch failed = error de conexión", isConnectionError(new TypeError("fetch failed")));
+check("causa de red anidada = error de conexión", isConnectionError(new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED") })));
+check("BinanceApiError NO es error de conexión", !isConnectionError(new BinanceApiError(400, -2010, "insufficient balance")));
+check("error común NO es error de conexión", !isConnectionError(new Error("presupuesto agotado")));
 
 // Cada estrategia real corre sana sobre velas sintéticas (sin red)
 const synth: Candle[] = Array.from({ length: 400 }, (_, i) => {
