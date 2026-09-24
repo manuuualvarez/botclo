@@ -2,10 +2,10 @@
 
 import { auth } from "@clerk/nextjs/server";
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/db";
-import { botConfigs } from "@/db/schema";
+import { botConfigs, botOrderIntents } from "@/db/schema";
 import { BACKTEST_SYMBOLS } from "@/lib/backtest";
 import { isTestnet } from "@/lib/binance/client";
 import { hasCredentials } from "@/lib/binance/credentials";
@@ -15,6 +15,8 @@ import { recordAcceptance } from "@/lib/legal";
 import { getEntitlement, plansEnforced } from "@/lib/plan";
 import { rateLimit, rateLimitMessage } from "@/lib/rate-limit";
 import { getStrategy } from "@/lib/strategies";
+import { withTradingLock } from "@/lib/bot/trading-lock";
+import { assertRequestedStatus, removalDecision, tradingActionError, TradingGuardError, withOwnedTradingBot } from "@/lib/bot/trading-guards";
 
 // El intervalo NO se elige: el robot opera con el intervalo para el que la
 // estrategia fue diseñada y backtesteada — otro intervalo sería una
@@ -36,6 +38,14 @@ export interface BotActionState {
 }
 
 export async function createBotAction(input: unknown): Promise<BotActionState> {
+  try {
+    return await withTradingLock(() => createBotLocked(input));
+  } catch (error) {
+    return { error: tradingActionError(error) };
+  }
+}
+
+async function createBotLocked(input: unknown): Promise<BotActionState> {
   const { userId } = await auth();
   if (!userId) return { error: "Tu sesión expiró. Volvé a ingresar." };
 
@@ -72,9 +82,9 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
   }
 
   const existing = await db
-    .select({ id: botConfigs.id })
+    .select({ id: botConfigs.id, symbol: botConfigs.symbol })
     .from(botConfigs)
-    .where(eq(botConfigs.userId, userId));
+    .where(and(eq(botConfigs.userId, userId), ne(botConfigs.status, "archived")));
   if (existing.length >= limits.maxBots) {
     return {
       error: `Tu plan (${limits.nombre}) permite hasta ${limits.maxBots} robots. Eliminá alguno o subí de plan desde «Mi plan».`,
@@ -84,6 +94,9 @@ export async function createBotAction(input: unknown): Promise<BotActionState> {
   const parsed = createSchema.safeParse(input);
   if (!parsed.success) {
     return { error: "Revisá los valores del formulario e intentá de nuevo." };
+  }
+  if (existing.some((bot) => bot.symbol === `${parsed.data.symbol}USDT`)) {
+    return { error: "Ya tenés un robot para ese par. Usá el existente para mantener una única posición atribuida." };
   }
 
   const strategy = getStrategy(parsed.data.strategyId);
@@ -153,26 +166,35 @@ async function ownedBot(userId: string, botId: number) {
 
 export async function setBotStatusAction(
   botId: number,
-  status: "active" | "paused"
-): Promise<void> {
-  const { userId } = await auth();
-  if (!userId) return;
-  const bot = await ownedBot(userId, botId);
-  if (!bot) return;
-  await db
-    .update(botConfigs)
-    .set({ status, updatedAt: new Date() })
-    .where(eq(botConfigs.id, botId));
+  status: unknown
+): Promise<BotActionState> {
+  try {
+    const nextStatus = assertRequestedStatus(status);
+    await withOwnedTradingBot(botId, { withLock: withTradingLock, authenticate: async () => (await auth()).userId, readBot: ownedBot }, async (bot) => {
+      if (nextStatus === "active" && bot.recoveryState === "review") throw new TradingGuardError("Este robot necesita conciliación antes de reanudar nuevas decisiones.");
+      // Pausar no cancela ni reemplaza la orden de protección en Binance.
+      await db.update(botConfigs).set({ status: nextStatus, updatedAt: new Date() }).where(eq(botConfigs.id, bot.id));
+    });
+  } catch (error) { return { error: tradingActionError(error) }; }
   revalidatePath("/dashboard/robot");
+  return { ok: true };
 }
 
-export async function deleteBotAction(botId: number): Promise<void> {
-  const { userId } = await auth();
-  if (!userId) return;
-  const bot = await ownedBot(userId, botId);
-  if (!bot) return;
-  await db.delete(botConfigs).where(eq(botConfigs.id, botId));
+export async function deleteBotAction(botId: number): Promise<BotActionState> {
+  try {
+    await withOwnedTradingBot(botId, { withLock: withTradingLock, authenticate: async () => (await auth()).userId, readBot: ownedBot }, async (bot) => {
+      const intents = await db.select().from(botOrderIntents).where(eq(botOrderIntents.botId, bot.id));
+      const decision = removalDecision(bot, intents);
+      if (decision.kind === "blocked") throw new TradingGuardError(decision.error);
+      if (decision.kind === "archive") {
+        await db.update(botConfigs).set({ status: "archived", updatedAt: new Date() }).where(eq(botConfigs.id, bot.id));
+      } else {
+        await db.delete(botConfigs).where(eq(botConfigs.id, bot.id));
+      }
+    });
+  } catch (error) { return { error: tradingActionError(error) }; }
   revalidatePath("/dashboard/robot");
+  return { ok: true };
 }
 
 // "Ejecutar ahora": corre un tick solo para ese robot (ideal para probar).
@@ -181,6 +203,7 @@ export async function runMyBotNowAction(
 ): Promise<BotActionState> {
   const { userId } = await auth();
   if (!userId) return { error: "Tu sesión expiró. Volvé a ingresar." };
+  if (!Number.isSafeInteger(botId) || botId <= 0) return { error: "El identificador del robot no es válido." };
 
   const limited = rateLimit(`bot-run:${userId}`, {
     limit: 10,
@@ -189,9 +212,11 @@ export async function runMyBotNowAction(
   if (!limited.ok) return { error: rateLimitMessage(limited) };
 
   const bot = await ownedBot(userId, botId);
-  if (!bot) return { error: "No encontramos ese robot." };
+  if (!bot || bot.status === "archived") return { error: "No encontramos ese robot." };
 
-  const outcome = await runBotTick(bot);
+  let outcome;
+  try { outcome = await runBotTick(bot); }
+  catch (error) { return { error: tradingActionError(error) }; }
   revalidatePath("/dashboard/robot");
   if (outcome.action === "error") return { error: outcome.detail };
 

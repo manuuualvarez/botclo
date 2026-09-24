@@ -1,10 +1,8 @@
 name: Deploy
 
-# CD: al mergear a main, buildea la imagen, la publica en GHCR y hace pull+up
-# en el VPS — solo dentro del proyecto Docker "botclo", sin tocar nada más.
+# Durante la migración, publicar requiere un disparo manual y CI verde
+# sobre el mismo commit. No desplegar automáticamente al mergear.
 on:
-  push:
-    branches: [main]
   workflow_dispatch: # permite dispararlo a mano desde la pestaña Actions
 
 concurrency:
@@ -12,7 +10,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  checks:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/ci.yml
+
   build-and-push:
+    needs: checks
+    if: github.ref == 'refs/heads/main'
     name: Build & push image
     runs-on: ubuntu-latest
     permissions:
@@ -66,8 +72,16 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -eu
             cd /docker/botclo
-            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
-            docker compose -f docker-compose.vps.yml pull web
-            docker compose -f docker-compose.vps.yml up -d
-            docker image prune -f
+            printf '%s' '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            cat > docker-compose.release.yml <<'RELEASE'
+            services:
+              web:
+                image: ghcr.io/${{ github.repository_owner }}/botclo:${{ github.sha }}
+                environment:
+                  BOT_NATIVE_PROTECTION_ENABLED: "false"
+            RELEASE
+            docker compose -f docker-compose.vps.yml -f docker-compose.release.yml pull web
+            docker compose -f docker-compose.vps.yml -f docker-compose.release.yml up -d --no-deps web
+            # Se conservan las imágenes anteriores para rollback.

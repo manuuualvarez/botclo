@@ -9,7 +9,8 @@ import {
   BinanceApiError,
   getAccountBalances,
 } from "@/lib/binance/client";
-import { saveCredentials } from "@/lib/binance/credentials";
+import { connectTradingAccount } from "@/lib/bot/trading-access";
+import { tradingActionError } from "@/lib/bot/trading-guards";
 import { recordAcceptance } from "@/lib/legal";
 import { rateLimit, rateLimitMessage } from "@/lib/rate-limit";
 
@@ -97,7 +98,11 @@ export async function connectBinanceAction(
     };
   }
 
-  await saveCredentials(userId, parsed.data.apiKey, parsed.data.apiSecret);
+  try {
+    await connectTradingAccount(userId, parsed.data.apiKey, parsed.data.apiSecret);
+  } catch (error) {
+    return { error: tradingActionError(error) };
+  }
   await recordAcceptance(userId, "binance_connect");
   revalidatePath("/dashboard");
   redirect("/dashboard");

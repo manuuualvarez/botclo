@@ -12,7 +12,7 @@ import {
   placeMarketOrder,
   roundToStep,
 } from "@/lib/binance/client";
-import { getDecryptedCredentials } from "@/lib/binance/credentials";
+import { readTradingAccount } from "./trading-access";
 import { capturePortfolioSnapshot } from "@/lib/binance/portfolio";
 import {
   dcaChunk,
@@ -31,6 +31,9 @@ import {
 } from "@/lib/strategies";
 import { sendTelegramMessage } from "@/lib/telegram";
 import { getTelegramCredentials } from "@/lib/telegram-settings";
+import { nativeProtectionEnabled, runNativeBotTick } from "./native-executor";
+import { TRADING_LOCK_KEY, withTradingLock } from "./trading-lock";
+import { createTradingStore } from "./trading-store";
 
 // Ejecutor del robot. Por tick y por bot:
 // 1. Chequea el stop de protección contra el precio ACTUAL (cada minuto).
@@ -50,7 +53,7 @@ export interface TickOutcome {
 // Lock global del tick: si un barrido tarda más que el intervalo del
 // scheduler, el siguiente `curl` no arranca en paralelo. Un solo tick
 // procesa los bots a la vez; los demás salen sin hacer nada.
-const TICK_LOCK_KEY = 918_273_645;
+const TICK_LOCK_KEY = TRADING_LOCK_KEY;
 
 // Prefijos del lastError de una orden en reintento. La dedup de alertas de
 // Telegram compara contra ESTAS constantes — no reescribir el texto en un
@@ -81,7 +84,7 @@ export async function runAllActiveBots(): Promise<TickOutcome[]> {
 
       const outcomes: TickOutcome[] = [];
       for (const bot of bots) {
-        outcomes.push(await runBotTick(bot));
+        outcomes.push(await runBotTickLocked(bot));
       }
 
       // Vigía de robots pausados: no operan, pero el usuario tiene que
@@ -92,7 +95,11 @@ export async function runAllActiveBots(): Promise<TickOutcome[]> {
         .where(eq(botConfigs.status, "paused"));
       for (const bot of paused) {
         try {
-          await watchPausedBot(bot);
+          if (bot.recoveryState !== "legacy" || nativeProtectionEnabled()) {
+            outcomes.push(await runBotTickLocked(bot));
+          } else {
+            await watchPausedBot(bot);
+          }
         } catch {
           // el vigía es best-effort
         }
@@ -338,6 +345,20 @@ async function notifyTrade(
 }
 
 export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
+  try {
+    return await withTradingLock(async () => {
+      const current = await db.query.botConfigs.findFirst({
+        where: and(eq(botConfigs.id, bot.id), eq(botConfigs.userId, bot.userId)),
+      });
+      if (!current) return { botId: bot.id, userId: bot.userId, action: "skip", detail: "el robot ya no existe" };
+      return runBotTickLocked(current);
+    });
+  } catch (error) {
+    return { botId: bot.id, userId: bot.userId, action: "error", detail: errorText(error) };
+  }
+}
+
+async function runBotTickLocked(bot: BotConfig): Promise<TickOutcome> {
   const now = new Date();
   const out = (action: TickOutcome["action"], detail: string): TickOutcome => ({
     botId: bot.id,
@@ -347,10 +368,24 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
   });
 
   try {
+    const journal = await createTradingStore(pg).listIntents(bot.id);
+    if (bot.recoveryState !== "legacy" || nativeProtectionEnabled() || journal.length > 0) {
+      const result = await runNativeBotTick(bot);
+      if (result.action === "buy" || result.action === "sell") {
+        await notifyAlert(bot, `${bot.symbol}: ${result.detail}. Revisá los importes y el estado de protección en Botclo.`);
+      }
+      const current = await db.query.botConfigs.findFirst({ where: eq(botConfigs.id, bot.id) });
+      const strategy = getStrategy(bot.strategyId);
+      if (current && strategy && bot.status === "active" && current.lastCandleTime !== bot.lastCandleTime && result.action === "hold") {
+        await notifyCandleReport(current, strategy.nombre, strategy.intervalo, result.detail);
+      }
+      return result;
+    }
+    if (bot.status !== "active") return out("hold", "robot pausado");
     const strategy = getStrategy(bot.strategyId);
     if (!strategy) return out("skip", "estrategia desconocida");
 
-    const creds = await getDecryptedCredentials(bot.userId);
+    const creds = await readTradingAccount(bot.userId);
     if (!creds) {
       await updateBot(bot.id, {
         lastRunAt: now,
@@ -762,6 +797,9 @@ export async function runBotTick(bot: BotConfig): Promise<TickOutcome> {
     return out("hold", `señal: ${signal}`);
   } catch (error) {
     const message = errorText(error);
+    if ((bot.recoveryState !== "legacy" || nativeProtectionEnabled()) && bot.lastError !== message) {
+      await notifyAlert(bot, `⚠️ ${bot.symbol}: ${message}`);
+    }
     await updateBot(bot.id, { lastRunAt: now, lastError: message }).catch(
       () => {}
     );
