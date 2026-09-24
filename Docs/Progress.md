@@ -1,5 +1,13 @@
 # Progreso
 
+## 2026-09-24 — Polling durante la recreación de web en Coolify
+
+- El preflight sigue rechazando servicios con contenedores ambiguos antes de modificar Coolify. Después de iniciar el deploy, la coexistencia transitoria del contenedor web viejo y el nuevo queda pendiente hasta que haya una única identidad verificable.
+- Los IDs de todas las dependencias se comparan en cada polling, incluso durante esa coexistencia. Un cambio, desaparición o duplicación de DB/bot continúa siendo un error; la superposición persistente de web vence por timeout sin afirmar éxito.
+- TDD ejecutado: tres regresiones fallaron con el parser original; luego **18 tests offline verdes**, incluyendo fixtures del listado Docker completo y verificación real del parser. Suite ejecutada con warnings tratados como errores y `git diff --check` limpio.
+- La suite del helper también corre en CI de PR y main, con warnings tratados como errores, antes de los checks de la aplicación.
+- Implementado, pendiente de validación. No se disparó un deploy ni se modificaron flags de Binance.
+
 ## 2026-09-24 — Deploy selectivo mediante Coolify
 
 - El workflow manual conserva CI y build de la imagen por commit. Replica esa imagen en el registry local y ejecuta el helper del mismo SHA; la ausencia de credenciales SSH produce un fallo explícito.
