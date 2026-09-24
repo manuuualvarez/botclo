@@ -16,7 +16,10 @@
     "db:push:docker": "docker compose -f docker-compose.dev.yml exec web pnpm db:push",
     "prod": "docker compose up -d --build",
     "prod:down": "docker compose down",
-    "prod:logs": "docker compose logs -f web"
+    "prod:logs": "docker compose logs -f web",
+    "test:trading": "tsx --test tests/binance-orders.test.mts tests/trading-engine.test.mts tests/trading-adoption.test.mts tests/trading-guards.test.mts",
+    "test:trading:db": "node scripts/test-trading-db.mjs",
+    "test:trading:recovery": "node scripts/test-trading-recovery.mjs"
   },
   "dependencies": {
     "@clerk/localizations": "^4.13.2",

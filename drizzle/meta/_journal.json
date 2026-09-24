@@ -8,6 +8,13 @@
       "when": 1783716691758,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790269185651,
+      "tag": "0001_trading_protection_journal",
+      "breakpoints": true
     }
   ]
 }

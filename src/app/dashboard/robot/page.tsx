@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import {
   AlertCircle,
   AlertTriangle,
@@ -52,6 +52,7 @@ const dateTime = new Intl.DateTimeFormat("es-AR", {
 function BotCard({ bot, insight }: { bot: BotConfig; insight: string | null }) {
   const strategy = getStrategy(bot.strategyId);
   const active = bot.status === "active";
+  const nativeProtection = bot.protectionIntentId !== null && bot.confirmedStopPrice !== null;
   const paramsResumen = strategy?.params
     .map((p) => {
       const value = (bot.params as Record<string, number>)[p.key] ?? p.default;
@@ -88,7 +89,7 @@ function BotCard({ bot, insight }: { bot: BotConfig; insight: string | null }) {
               Velas de {strategy?.intervalo ?? bot.interval} · {paramsResumen}
             </p>
           </div>
-          <BotControls botId={bot.id} status={bot.status} />
+          <BotControls botId={bot.id} status={bot.status} nativeProtection={nativeProtection} />
         </div>
 
         {insight && (
@@ -120,17 +121,20 @@ function BotCard({ bot, insight }: { bot: BotConfig; insight: string | null }) {
             </p>
           </div>
           <div>
-            <p className="text-muted-foreground">Stop de protección</p>
+            <p className="text-muted-foreground">Stop confirmado en Binance</p>
             <p className="font-medium tabular-nums">
-              {bot.stopPrice ? (
+              {nativeProtection ? (
                 <span className="inline-flex items-center gap-1">
                   <ShieldAlert className="size-3.5 text-amber-300" />
-                  {formatUsd(bot.stopPrice)}
+                  {formatUsd(Number(bot.confirmedStopPrice))}
                 </span>
               ) : (
-                "—"
+                "Sin confirmar"
               )}
             </p>
+            {bot.stopPrice !== null && !nativeProtection && (
+              <p className="mt-1 text-xs text-muted-foreground">Referencia local: {formatUsd(bot.stopPrice)}. Depende del servidor.</p>
+            )}
           </div>
           <div>
             <p className="text-muted-foreground">Última revisión</p>
@@ -142,6 +146,18 @@ function BotCard({ bot, insight }: { bot: BotConfig; insight: string | null }) {
             </p>
           </div>
         </div>
+
+        {(bot.recoveryState !== "ready" || bot.recoveryReason) && (
+          <Alert className="mt-4">
+            <ShieldAlert className="size-4" />
+            <AlertTitle>{bot.recoveryState === "legacy" ? "Migración de protección pendiente" : "Conciliación del robot"}</AlertTitle>
+            <AlertDescription>
+              {bot.recoveryReason ?? (bot.recoveryState === "legacy"
+                ? "Este robot todavía usa el sistema anterior. Su stop local depende del servidor; aún no tiene protección confirmada en Binance."
+                : "No pudimos confirmar el estado del robot. Las nuevas decisiones están bloqueadas hasta completar la conciliación.")}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {bot.lastError && (
           <Alert variant="destructive" className="mt-4">
@@ -191,7 +207,7 @@ export default async function RobotPage() {
   const bots = await db
     .select()
     .from(botConfigs)
-    .where(eq(botConfigs.userId, userId))
+    .where(and(eq(botConfigs.userId, userId), ne(botConfigs.status, "archived")))
     .orderBy(botConfigs.createdAt);
 
   const telegram = await getTelegramStatus(userId);

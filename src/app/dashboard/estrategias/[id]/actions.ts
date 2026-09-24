@@ -7,7 +7,7 @@ import {
   getTakerFeePct,
   BinanceApiError,
 } from "@/lib/binance/client";
-import { getDecryptedCredentials } from "@/lib/binance/credentials";
+import { readTradingAccount } from "@/lib/bot/trading-access";
 import {
   BACKTEST_PERIODS,
   BACKTEST_SYMBOLS,
@@ -92,7 +92,7 @@ async function userTakerFeePct(userId: string): Promise<number | null> {
 
   let pct: number | null = null;
   try {
-    const creds = await getDecryptedCredentials(userId);
+    const creds = await readTradingAccount(userId);
     if (creds) pct = await getTakerFeePct(creds.apiKey, creds.apiSecret);
   } catch {
     pct = null; // sin cuenta conectada o Binance caído: comisión estándar

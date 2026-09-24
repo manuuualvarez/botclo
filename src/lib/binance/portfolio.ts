@@ -1,7 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import { db } from "@/db";
 import { portfolioSnapshots } from "@/db/schema";
-import { getDecryptedCredentials } from "./credentials";
+import { readTradingAccount } from "../bot/trading-access";
 import { get24hTickers, getAccountBalances, isTestnet } from "./client";
 
 // Stablecoins valuadas 1:1 con el dólar (no tienen par XXXUSDT o no hace
@@ -41,7 +41,7 @@ export async function getPortfolio(
   const cached = portfolioCache.get(userId);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
 
-  const creds = await getDecryptedCredentials(userId);
+  const creds = await readTradingAccount(userId);
   if (!creds) return null;
 
   const balances = await getAccountBalances(creds.apiKey, creds.apiSecret);

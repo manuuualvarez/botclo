@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { ArrowLeft, Lock } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,7 @@ import { BotSetup } from "@/components/bot/bot-setup";
 import { db } from "@/db";
 import { botConfigs } from "@/db/schema";
 import { getAccountBalances, isTestnet } from "@/lib/binance/client";
-import { getDecryptedCredentials } from "@/lib/binance/credentials";
+import { readTradingAccount } from "@/lib/bot/trading-access";
 import { getEntitlement, plansEnforced } from "@/lib/plan";
 import { strategies } from "@/lib/strategies";
 
@@ -25,14 +25,14 @@ export default async function NuevoRobotPage({
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const creds = await getDecryptedCredentials(userId);
+  const creds = await readTradingAccount(userId);
   if (!creds) redirect("/dashboard/conectar");
 
   const ent = await getEntitlement(userId);
   const existing = await db
     .select({ id: botConfigs.id })
     .from(botConfigs)
-    .where(eq(botConfigs.userId, userId));
+    .where(and(eq(botConfigs.userId, userId), ne(botConfigs.status, "archived")));
   if (existing.length >= ent.limits.maxBots) redirect("/dashboard/robot");
 
   // El mismo candado que aplica el server al crear (robot/actions.ts), pero

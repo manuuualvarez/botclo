@@ -6,6 +6,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_call:
 
 jobs:
   checks:
@@ -36,6 +37,15 @@ jobs:
 
       - name: Tests de lógica (crypto, estrategias, facturación)
         run: pnpm test:ci
+
+      - name: Trading — recuperación y protecciones (offline)
+        run: pnpm test:trading
+
+      - name: Trading — migraciones y persistencia PostgreSQL
+        run: pnpm test:trading:db
+
+      - name: Trading — caída de proceso y restore real
+        run: pnpm test:trading:recovery
 
       - name: Build
         run: pnpm build
