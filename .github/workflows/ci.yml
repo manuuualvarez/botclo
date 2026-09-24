@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Deploy selectivo de Coolify (offline)
+        run: python3 -W error -m unittest discover -s tests -p 'test_deploy_coolify.py' -v
+
       - uses: pnpm/action-setup@v4
         with:
           version: 9

@@ -86,17 +86,25 @@ def image_id(image):
     return identity
 
 
-def project_containers(service_uuid):
+def project_containers(service_uuid, replacing_service=None):
     output = docker("ps", "-a", "--no-trunc", "--filter",
                     "label=com.docker.compose.project=" + service_uuid,
                     "--format", '{{.ID}}\t{{.Label "com.docker.compose.service"}}')
     containers = {}
+    overlapping = set()
     for line in output.splitlines():
         parts = line.split("\t")
-        if len(parts) != 2 or not parts[1] or parts[1] in containers:
+        if len(parts) != 2 or not parts[1]:
             raise DeploymentError("The Coolify project contains ambiguous service containers.")
+        if parts[1] in containers:
+            if parts[1] != replacing_service or replacing_service != "web":
+                raise DeploymentError("The Coolify project contains ambiguous service containers.")
+            overlapping.add(parts[1])
         containers[parts[1]] = parts[0]
-    return containers
+    # Compose can briefly list both old and new web containers. Keep checking
+    # every dependency, but do not verify web until its identity is unambiguous.
+    return {service: identity for service, identity in containers.items()
+            if service not in overlapping}
 
 
 def container_ready(container, image, expected_id):
@@ -138,7 +146,7 @@ def deploy(config_path, image, timeout=300):
                    "/start?latest=false&force=false")
     deadline = time.monotonic() + timeout
     while True:
-        current = project_containers(client.service_uuid)
+        current = project_containers(client.service_uuid, replacing_service="web")
         if {key: value for key, value in current.items() if key != "web"} != dependencies:
             raise DeploymentError("A dependency container changed during the selective web deployment.")
         container = current.get("web")

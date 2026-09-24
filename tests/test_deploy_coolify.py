@@ -158,6 +158,60 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(module, "docker", side_effect=module.DeploymentError("Container missing.")):
             self.assertFalse(module.container_ready("old-web", IMAGE, IMAGE_ID))
 
+    def deploy_with_docker_output(self, outputs, timeout=10):
+        with patch.object(module.CoolifyClient, "request", side_effect=self.request), \
+             patch.object(module, "image_id", return_value=IMAGE_ID), \
+             patch.object(module, "docker", side_effect=outputs), \
+             patch.object(module.time, "monotonic", side_effect=range(20)), \
+             patch.object(module.time, "sleep"):
+            return module.deploy(self.config, IMAGE, timeout=timeout)
+
+    def test_overlapping_web_containers_before_deploy_prevent_mutation(self):
+        with self.assertRaisesRegex(module.DeploymentError, "ambiguous service containers"):
+            self.deploy_with_docker_output([
+                "old-web\tweb\nnew-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+            ])
+        self.assertEqual([call[0] for call in self.calls], ["GET"])
+
+    def test_web_overlap_waits_until_a_single_verified_container_remains(self):
+        result = self.deploy_with_docker_output([
+            "old-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+            "old-web\tweb\nnew-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+            "new-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+            f"true\nhealthy\n{IMAGE_ID}\n{IMAGE}\n",
+        ])
+        self.assertEqual(result["container_id"], "new-web")
+        self.assertTrue(result["other_container_ids_unchanged"])
+        self.assertEqual([call[0] for call in self.calls], ["GET", "PATCH", "POST"])
+
+    def test_dependency_change_during_web_overlap_is_still_failure(self):
+        for dependencies in ["replacement\tdb\nscheduler\tbot\n",
+                             "database\tdb\nreplacement\tbot\n",
+                             "database\tdb\n"]:
+            with self.subTest(dependencies=dependencies), \
+                 self.assertRaisesRegex(module.DeploymentError, "dependency container changed"):
+                self.deploy_with_docker_output([
+                    "old-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+                    "old-web\tweb\nnew-web\tweb\n" + dependencies,
+                ])
+
+    def test_dependency_overlap_during_web_overlap_is_still_failure(self):
+        for dependency in ["db", "bot"]:
+            with self.subTest(dependency=dependency), \
+                 self.assertRaisesRegex(module.DeploymentError, "ambiguous service containers"):
+                self.deploy_with_docker_output([
+                    "old-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+                    "old-web\tweb\nnew-web\tweb\ndatabase\tdb\nscheduler\tbot\n"
+                    + "replacement\t" + dependency + "\n",
+                ])
+
+    def test_persistent_web_overlap_times_out_without_claiming_success(self):
+        with self.assertRaisesRegex(module.DeploymentError, "Timed out"):
+            self.deploy_with_docker_output([
+                "old-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+                "old-web\tweb\nnew-web\tweb\ndatabase\tdb\nscheduler\tbot\n",
+            ], timeout=0)
+
 
 if __name__ == "__main__":
     unittest.main()
