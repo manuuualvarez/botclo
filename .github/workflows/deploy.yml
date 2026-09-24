@@ -27,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verificar deploy selectivo de Coolify (offline)
+        run: python3 -m unittest discover -s tests -p 'test_deploy_coolify.py' -v
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Login a GitHub Container Registry
@@ -57,15 +60,17 @@ jobs:
       packages: read
       contents: read
     steps:
-      - name: ¿Hay acceso SSH configurado?
-        id: guard
+      - name: Validar acceso SSH configurado
         env:
           HOST: ${{ secrets.VPS_HOST }}
+          SSH_USER: ${{ secrets.VPS_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
         run: |
-          if [ -n "$HOST" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; echo "⏭️  Falta VPS_HOST — se omite el deploy por SSH (la imagen igual quedó en GHCR)."; fi
+          test -n "$HOST" || { echo "Falta VPS_HOST: deploy cancelado."; exit 1; }
+          test -n "$SSH_USER" || { echo "Falta VPS_USER: deploy cancelado."; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" || { echo "Falta VPS_SSH_KEY: deploy cancelado."; exit 1; }
 
-      - name: Pull + up en el VPS (solo proyecto botclo)
-        if: steps.guard.outputs.ok == 'true'
+      - name: Publicar imagen local y actualizar solo web en Coolify
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -73,15 +78,17 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -eu
-            cd /docker/botclo
             printf '%s' '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-            cat > docker-compose.release.yml <<'RELEASE'
-            services:
-              web:
-                image: ghcr.io/${{ github.repository_owner }}/botclo:${{ github.sha }}
-                environment:
-                  BOT_NATIVE_PROTECTION_ENABLED: "false"
-            RELEASE
-            docker compose -f docker-compose.vps.yml -f docker-compose.release.yml pull web
-            docker compose -f docker-compose.vps.yml -f docker-compose.release.yml up -d --no-deps web
-            # Se conservan las imágenes anteriores para rollback.
+            source_image='ghcr.io/${{ github.repository_owner }}/botclo:${{ github.sha }}'
+            release_image='127.0.0.1:5000/migration/botclo-web:${{ github.sha }}'
+            docker pull "$source_image"
+            docker tag "$source_image" "$release_image"
+            docker push "$release_image"
+            umask 077
+            mkdir -p /data/migration
+            helper='/data/migration/deploy-coolify-${{ github.sha }}.py'
+            curl --fail --silent --show-error --location \
+              'https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/scripts/deploy-coolify.py' \
+              --output "$helper"
+            python3 "$helper" "$release_image"
+            # Coolify conserva la configuración y las dependencias del stack.
