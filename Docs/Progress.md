@@ -1,5 +1,12 @@
 # Progreso
 
+## 2026-09-24 — Deploy selectivo mediante Coolify
+
+- El workflow manual conserva CI y build de la imagen por commit. Replica esa imagen en el registry local y ejecuta el helper del mismo SHA; la ausencia de credenciales SSH produce un fallo explícito.
+- El helper Python, sin dependencias, lee la configuración privada local y actualiza únicamente `BOTCLO_WEB_IMAGE`. Solicita el arranque exclusivo de `web` mediante la API de Coolify; no modifica flags de trading, archivos de secretos ni el Compose anterior.
+- Verifica la identidad local de la imagen, un único servicio web, su estado running/healthy cuando hay healthcheck, y que los IDs de los contenedores restantes no cambien. HTTP con error o token vacío impiden continuar; respuestas y credenciales nunca se imprimen.
+- TDD ejecutado: primero fallo por helper ausente y luego por recreación entre listado/inspección; finalmente **13 tests offline verdes**, incluyendo endpoint selectivo, fallo HTTP, redacción de secretos, rechazo de redirects, token vacío, imagen incorrecta y cambio inesperado de la base. El workflow ejecuta esta suite antes de publicar la imagen. Verificación runtime de este flujo pendiente del primer deploy en Coolify.
+
 ## 2026-09-24 — Protección Binance y recuperación
 
 - Estado del plan: **aprobado por Manu**. Implementación local en rama `codex/binance-protection`; cierre pendiente de validación.
